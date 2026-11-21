@@ -1,0 +1,19 @@
+{
+  "name": "blink",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "24.x" },
+  "scripts": {
+    "dev": "concurrently --kill-others \"vite --port 5173\" \"PORT=5174 tsx watch server/index.ts\"",
+    "build": "vite build",
+    "start": "tsx server/index.ts",
+    "test": "node --import tsx --test \"server/**/*.test.ts\" \"web/src/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.2"
+  }
+}
