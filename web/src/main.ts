@@ -15,46 +15,47 @@ const examples = [
 ];
 
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
+  <svg class="svg-defs" width="0" height="0" aria-hidden="true"><defs><filter id="rough"><feTurbulence type="fractalNoise" baseFrequency=".9" numOctaves="2" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.2"/></filter></defs></svg>
   <header class="header">
-    <div class="brand"><span class="brand-mark" aria-hidden="true">↯</span><h1>Blink</h1></div>
-    <p class="tagline">Apps at the speed of thought. <span>Kimi K3.1 Pro on Cerebras, via OpenClaw.</span></p>
-    <a class="nav-link" href="/gallery">Gallery ↗</a>
-    <button id="new" class="quiet-button" type="button" disabled>New <span aria-hidden="true">↗</span></button>
+    <a class="brand" href="/" aria-label="Blink home"><span class="shutter" aria-hidden="true"></span>Blink</a>
+    <nav aria-label="Main navigation"><a class="nav-link" href="/gallery">Gallery</a><button id="new" type="button" disabled>New</button></nav>
   </header>
   <main>
     <div id="builder">
     <section class="intro" aria-labelledby="headline">
-      <p class="eyebrow"><span class="signal" aria-hidden="true"></span> One sentence. A working app.</p>
-      <h2 id="headline">Think it.<br class="mobile-break"> <span>Blink it.</span></h2>
+      <h1 id="headline">Think it. <em>Blink it.</em></h1>
+      <p class="sub">Describe an app in one sentence. Kimi K3.1 Pro on Cerebras writes working versions side by side. Circle the one you like and keep going.</p>
       <form id="prompt-form">
         <label class="sr-only" for="prompt">Describe your app</label>
         <div class="prompt-bar">
-          <span class="prompt-symbol" aria-hidden="true">↳</span>
           <input id="prompt" name="prompt" type="text" placeholder="What do you want to make?" autocomplete="off" maxlength="500" required>
-          <label class="variations-control"><input id="variations" type="checkbox"><span>×4 <span class="variations-word">variations</span></span></label>
-          <button id="submit" class="primary-button" type="submit" disabled>Blink <span aria-hidden="true">↗</span></button>
+          <button id="variations" class="variations-control" type="button" aria-pressed="false">×4 variations</button>
+          <button id="submit" class="primary-button" type="submit" disabled>Blink</button>
         </div>
       </form>
       <div class="examples" aria-label="Example prompts"></div>
     </section>
     <div class="workspace-heading">
-      <p>From idea to interaction<span class="workspace-detail"> / live workspace</span></p>
+      <p>From idea to interaction<span class="workspace-detail"> · live workspace</span></p>
       <label id="race-control" class="race-control" hidden><input id="race" type="checkbox"><span>Race mode</span><span class="toggle" aria-hidden="true"></span></label>
     </div>
-    <div id="lanes" class="lanes"></div>
-    <div id="variations-grid" class="variations-grid" aria-label="Four variations" hidden></div>
+    <section id="variations-strip" aria-label="Film strip" hidden>
+      <div class="strip-label"><b>Four variations</b><span id="roll-status" role="status">Pick a frame to keep going</span></div>
+      <div id="variations-grid" class="variations-grid strip" aria-label="Four variations"></div>
+    </section>
+    <div id="lanes" class="lanes" aria-label="Workspace"></div>
     <p id="config-message" class="config-message" role="status"></p>
     <div id="load-error" class="load-error" role="alert" hidden><span></span><button type="button" class="quiet-button">Retry</button></div>
     </div>
     <section class="gallery-section" aria-labelledby="gallery-title">
-      <div class="gallery-heading"><div><p class="eyebrow">Made with one sentence</p><h2 id="gallery-title">Fresh from the community</h2></div><a id="gallery-link" class="nav-link" href="/gallery">View all ↗</a></div>
+      <div class="gallery-heading"><h2 id="gallery-title">Contact sheet</h2><a id="gallery-link" class="quiet-button" href="/gallery">See all</a></div>
       <div id="gallery-grid" class="gallery-grid"></div>
       <p id="gallery-message" class="config-message" role="status"></p>
       <button id="load-more" class="quiet-button" type="button">Load more</button>
     </section>
   </main>
   <div id="toast" class="toast" role="status" hidden></div>
-  <footer><span>Built for the moment inspiration hits.</span><span>Powered by OpenClaw <span aria-hidden="true">↗</span></span></footer>
+  <footer>Blink · Kimi K3.1 Pro on Cerebras, via OpenClaw · #KimiOnCerebras</footer>
 `;
 
 function element<T extends HTMLElement>(selector: string, root: ParentNode = document): T {
@@ -67,60 +68,73 @@ const submit = element<HTMLButtonElement>('#submit');
 const newButton = element<HTMLButtonElement>('#new');
 const race = element<HTMLInputElement>('#race');
 const lanesElement = element<HTMLDivElement>('#lanes');
-const variations = element<HTMLInputElement>('#variations');
+const variations = element<HTMLButtonElement>('#variations');
+const variationsStrip = element<HTMLElement>('#variations-strip');
 const variationsGrid = element<HTMLDivElement>('#variations-grid');
 const galleryOnly = location.pathname === '/gallery';
 element('#builder').hidden = galleryOnly;
 element('#new').hidden = galleryOnly;
 element('#gallery-link').hidden = galleryOnly;
-if (galleryOnly) {
-  element('#gallery-title').textContent = 'The Blink gallery';
-  element('.brand').innerHTML = '<a href="/" aria-label="Blink home"><span class="brand-mark" aria-hidden="true">↯</span><h1>Blink</h1></a>';
-}
 let choosingVariation = false;
 let remixLoading = false;
 let lastRun: { idea: string; mode: 'solo' | 'race' | 'variations'; bodies: GenerateBody[] } | null = null;
 let toastTimer = 0;
 let retryTimer = 0;
 let variantsEnabled = true;
-function toast(message: string) {
+function toast(message: string, error = false) {
   const root = element('#toast');
   root.textContent = message;
+  root.classList.toggle('is-error', error);
   root.hidden = false;
   window.clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => { root.hidden = true; }, 4000);
 }
 let controller: AbortController | null = null;
 let frame = 0;
+let choiceTimer = 0;
+
+function variationsOn() { return variations.getAttribute('aria-pressed') === 'true'; }
+function setVariations(on: boolean) { variations.setAttribute('aria-pressed', String(on)); }
 
 function createLane(id: string, label: string, host: HTMLElement = lanesElement) {
+  const isVariant = id.startsWith('variant-');
   const root = document.createElement('section');
-  root.className = `lane lane-${id}`;
+  root.className = `lane lane-${id}${isVariant ? ' mini-lane frame' : ''}`;
   root.setAttribute('aria-label', label);
+  const status = '<span class="lane-status" role="status">Ready to Blink</span>';
   root.innerHTML = `
-    <div class="lane-heading"><h3></h3><span class="lane-status" role="status">Ready to Blink</span></div>
+    ${isVariant ? '<svg class="circle" viewBox="0 0 300 240" preserveAspectRatio="none" aria-hidden="true"><path d="M150 8 C 260 4 296 50 292 120 C 288 200 230 232 146 230 C 50 228 8 190 10 116 C 12 46 70 12 166 14"/></svg>' : ''}
+    <div class="lane-heading"><h3></h3>${isVariant ? '' : status}</div>
     <div class="panels">
       <section class="panel code-panel" aria-label="Generated code">
-        <div class="panel-heading"><span><span class="panel-icon" aria-hidden="true">&lt;/&gt;</span> Code</span><span class="code-meta">index.html</span></div>
+        <div class="panel-heading"><span>index.html</span><span class="code-meta">Source</span></div>
         <pre tabindex="0" aria-label="Generated HTML source"><code></code></pre>
       </section>
       <section class="panel preview-panel" aria-label="App preview">
-        <div class="panel-heading"><span><span class="preview-dot" aria-hidden="true"></span> Preview</span><button class="download" type="button" disabled>Download .html <span aria-hidden="true">↓</span></button></div>
-        <div class="preview-body">
-          <div class="preview-empty"><span class="empty-mark" aria-hidden="true">↯</span><strong>Your next idea lives here.</strong><span>Describe it above. Play it here.</span></div>
+        <div class="panel-heading"><span>Preview · live</span></div>
+        <div class="preview-body${isVariant ? ' exposure' : ''}">
+          <div class="preview-empty"><span class="shutter" aria-hidden="true"></span><strong>Your next idea lives here.</strong><span>Describe it above. Play it here.</span></div>
           <iframe sandbox="allow-scripts" hidden></iframe>
+          ${isVariant ? `${status}<pre class="code-rain" aria-hidden="true"></pre>` : ''}
+        </div>
+        ${isVariant ? '<div class="frame-edge"><span class="frame-label"></span><span class="frame-metrics"></span></div>' : ''}
+        <div class="stats-bar">
+          <div class="stat speed"><div><span data-stat="speed">—</span></div><span class="stat-label">tok/s</span></div>
+          <div class="stat"><div><span data-stat="tokens">—</span></div><span class="stat-label token-label">Output tokens</span></div>
+          <div class="stat"><div><span data-stat="total">—</span><span class="stat-unit">s</span></div><span class="stat-label">Total</span></div>
+          <div class="stat"><div><span data-stat="ttft">—</span><span class="stat-unit">ms</span></div><span class="stat-label">First token</span></div>
+          <p class="measurement">Measured by Blink<span class="estimate">Waiting for your idea</span></p>
+        </div>
+        <div class="lane-actions">
+          <form class="remix-form"><input class="remix-prompt" aria-label="Describe your remix" placeholder="Change it: add a streak counter…" maxlength="500" required disabled><button class="remix primary-button" type="submit" disabled>Remix</button></form>
+          <button class="share quiet-button" type="button" disabled>Share</button>
+          <button class="download quiet-button" type="button" disabled>Download <span class="sr-only">.html</span></button>
+          <button class="use-variant pick" type="button" hidden>Use this one</button>
+          <div class="share-links" hidden><a class="post-x" target="_blank" rel="noopener noreferrer">Post on X ↗</a><a class="open-share" target="_blank" rel="noopener noreferrer">Open ↗</a><input class="share-url" readonly aria-label="Share URL"></div>
         </div>
       </section>
     </div>
     <div class="lane-error" role="alert" hidden><span></span><button class="retry quiet-button" type="button">Retry</button></div>
-    <div class="stats-bar">
-      <div class="stat speed"><div><span data-stat="speed">—</span><span class="stat-unit">tok/s</span></div><span class="stat-label">Generation speed</span></div>
-      <div class="stat"><div><span data-stat="total">—</span><span class="stat-unit">s</span></div><span class="stat-label">Total time</span></div>
-      <div class="stat"><div><span data-stat="ttft">—</span><span class="stat-unit">ms</span></div><span class="stat-label">First token</span></div>
-      <div class="stat"><div><span data-stat="tokens">—</span></div><span class="stat-label token-label">Output tokens</span></div>
-      <p class="measurement">measured by Blink<span class="estimate">Waiting for your idea</span></p>
-    </div>
-    <div class="lane-actions"><button class="share quiet-button" type="button" disabled>Share ↗</button><button class="use-variant primary-button" type="button" hidden>Use this one</button><div class="share-links" hidden><a class="post-x" target="_blank" rel="noopener noreferrer">Post on X ↗</a><a class="open-share" target="_blank" rel="noopener noreferrer">Open ↗</a><input class="share-url" readonly aria-label="Share URL"></div></div>
   `;
   element('h3', root).textContent = label;
   element<HTMLIFrameElement>('iframe', root).title = `${label} app preview`;
@@ -152,6 +166,14 @@ function createLane(id: string, label: string, host: HTMLElement = lanesElement)
   });
   element('.share', root).addEventListener('click', () => { void shareLane(lane); });
   element('.use-variant', root).addEventListener('click', () => chooseVariation(lane));
+  element('.remix-form', root).addEventListener('submit', event => {
+    event.preventDefault();
+    if (controller || remixLoading || !lane.appId) return;
+    const input = element<HTMLInputElement>('.remix-prompt', root);
+    prompt.value = input.value;
+    updateControls();
+    form.requestSubmit();
+  });
   host.append(root);
   return lane;
 }
@@ -159,9 +181,9 @@ function createLane(id: string, label: string, host: HTMLElement = lanesElement)
 const cerebras = createLane('cerebras', 'Cerebras · Kimi K3.1 Pro');
 const compare = createLane('compare', 'Comparison');
 compare.root.hidden = true;
-const variantLanes = ['Classic, polished', 'Bold & playful', 'Minimal & elegant', 'Retro / arcade'].map((label, index) => {
+const variantLanes = ['Classic', 'Bold', 'Minimal', 'Retro'].map((label, index) => {
   const lane = createLane(`variant-${index}`, label, variationsGrid);
-  lane.root.classList.add('mini-lane');
+  element('.frame-label', lane.root).textContent = `${index + 1}A ▸ ${label}`;
   element('.use-variant', lane.root).hidden = false;
   element('.share', lane.root).hidden = true;
   return lane;
@@ -181,12 +203,14 @@ function updateControls() {
   prompt.placeholder = remix ? 'What would you like to change?' : 'What do you want to make?';
   prompt.setAttribute('aria-label', remix ? 'Describe your remix' : 'Describe your app');
   submit.disabled = busy || !prompt.value.trim();
-  submit.innerHTML = busy ? 'Blinking<span class="button-pulse" aria-hidden="true">…</span>' : `${remix ? 'Remix' : 'Blink'} <span aria-hidden="true">↗</span>`;
+  submit.textContent = busy ? 'Blinking…' : remix ? 'Remix' : 'Blink';
   race.disabled = busy;
   variations.disabled = busy || !variantsEnabled;
   newButton.disabled = !busy && !generationLanes.some(lane => lane.text || lane.html || lane.error);
   document.querySelectorAll<HTMLButtonElement>('.example').forEach(button => { button.disabled = busy; });
   for (const lane of generationLanes) {
+    element<HTMLInputElement>('.remix-prompt', lane.root).disabled = busy || choosingVariation || !lane.appId || lane.phase !== 'done';
+    element<HTMLButtonElement>('.remix', lane.root).disabled = busy || choosingVariation || !lane.appId || lane.phase !== 'done';
     lane.download.disabled = busy || !lane.html || lane.phase !== 'done';
     element<HTMLButtonElement>('.share', lane.root).disabled = busy || !lane.appId || lane.phase !== 'done' || lane.sharing;
     element<HTMLButtonElement>('.use-variant', lane.root).disabled = busy || !lane.html || lane.phase !== 'done';
@@ -216,6 +240,10 @@ function renderStats(lane: LaneState) {
     ? (lane.stats.tokensEstimated ? 'Tokens estimated · chars ÷ 4' : 'Reported output tokens')
     : lane.streaming ? 'Live estimate · chars ÷ 4' : lane.error ? 'Generation interrupted' : 'Waiting for your idea';
   element('.token-label', lane.root).textContent = lane.stats?.tokensEstimated || lane.streaming ? 'Estimated tokens' : 'Output tokens';
+  if (lane.root.classList.contains('frame')) {
+    element('.frame-metrics', lane.root).textContent = lane.error ? 'Needs attention' : lane.text
+      ? `${values.speed} tok/s · ${values.total} s` : lane.position > 0 ? `Queue #${lane.position}` : 'Waiting';
+  }
 }
 
 function renderLane(lane: LaneState) {
@@ -225,6 +253,18 @@ function renderLane(lane: LaneState) {
   lane.root.setAttribute('aria-busy', String(lane.streaming));
   lane.status.textContent = lane.error ? 'Needs attention' : lane.streaming
     ? generationStatus(lane, lane.position, performance.now()) : lane.html ? 'Ready to play' : 'Ready to Blink';
+  if (lane.root.classList.contains('frame')) {
+    const state = lane.error ? 'error' : lane.phase === 'done' ? 'done' : lane.phase === 'streaming' ? 'developing' : 'queued';
+    lane.root.setAttribute('data-state', state);
+    element('.code-rain', lane.root).textContent = lane.text;
+    if (state === 'queued' && lane.position === 0) {
+      const seconds = Math.max(0, Math.floor((performance.now() - (lane.waitingAt ?? lane.started)) / 1000));
+      lane.status.textContent = `Waiting for Cerebras · ${seconds} s`;
+    }
+    const completed = variantLanes.filter(variant => variant.phase === 'done').length;
+    const tokens = variantLanes.reduce((sum, variant) => sum + (variant.stats?.outputTokens ?? 0), 0);
+    element('#roll-status').textContent = completed === 4 ? `4 frames · ${tokens.toLocaleString()} tokens` : `${completed}/4 frames developed`;
+  }
   const error = element<HTMLElement>('.lane-error', lane.root);
   element('span', error).textContent = lane.error;
   element('.retry', lane.root).hidden = lane.errorKind !== 'generation' || !lane.retryable;
@@ -327,27 +367,35 @@ function scheduleRender() {
 }
 
 function chooseVariation(lane: LaneState) {
-  if (controller || !lane.html || lane.phase !== 'done') return;
-  choosingVariation = false;
-  variationsGrid.hidden = true;
-  lanesElement.hidden = false;
-  variations.checked = false;
-  cerebras.text = lane.text;
-  cerebras.appId = lane.appId;
-  cerebras.stats = lane.stats;
-  cerebras.phase = 'done';
-  cerebras.error = '';
-  cerebras.errorKind = null;
-  cerebras.started = lane.started;
-  cerebras.firstDelta = lane.firstDelta;
-  cerebras.conversationId = lane.conversationId;
-  element('.share-links', cerebras.root).hidden = true;
-  setPreview(cerebras, lane.html);
-  // Stop unused apps after selection; the chosen main preview has its own fresh frame.
-  for (const variant of variantLanes) clearLanePreview(variant);
-  renderLane(cerebras);
-  updateControls();
-  prompt.focus();
+  if (controller || !choosingVariation || !lane.html || lane.phase !== 'done') return;
+  for (const variant of variantLanes) variant.root.classList.toggle('chosen', variant === lane);
+  window.clearTimeout(choiceTimer);
+  const expand = () => {
+    choiceTimer = 0;
+    if (controller || !choosingVariation) return;
+    choosingVariation = false;
+    variationsStrip.hidden = true;
+    lanesElement.hidden = false;
+    setVariations(false);
+    cerebras.text = lane.text;
+    cerebras.appId = lane.appId;
+    cerebras.stats = lane.stats;
+    cerebras.phase = 'done';
+    cerebras.error = '';
+    cerebras.errorKind = null;
+    cerebras.started = lane.started;
+    cerebras.firstDelta = lane.firstDelta;
+    cerebras.conversationId = lane.conversationId;
+    element('.share-links', cerebras.root).hidden = true;
+    setPreview(cerebras, lane.html);
+    // Stop unused apps; the selected workspace gets its own fresh sandbox.
+    for (const variant of variantLanes) clearLanePreview(variant);
+    renderLane(cerebras);
+    updateControls();
+    prompt.focus();
+  };
+  // Keep the circle visible before expanding into the existing workspace.
+  choiceTimer = window.setTimeout(expand, window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 550);
 }
 
 async function shareLane(lane: LaneState) {
@@ -373,7 +421,7 @@ async function shareLane(lane: LaneState) {
       toast('Link ready. Copy it below.');
     }
   } catch (error) {
-    toast(error instanceof Error ? error.message : 'Sharing failed. Please try again.');
+    toast(error instanceof Error ? error.message : 'Sharing failed. Please try again.', true);
   } finally {
     lane.sharing = false;
     updateControls();
@@ -385,7 +433,7 @@ form.addEventListener('submit', event => {
   const idea = prompt.value.trim();
   if (!idea || idea.length > prompt.maxLength || controller || remixLoading) return;
   if (race.checked) syncRaceContexts();
-  const mode = race.checked ? 'race' : variations.checked ? 'variations' : 'solo';
+  const mode = race.checked ? 'race' : variationsOn() ? 'variations' : 'solo';
   const sources = mode === 'race' ? [cerebras, compare] : [cerebras];
   const bodies: GenerateBody[] = sources.map(lane => ({
     prompt: idea, lane: lane.id as Lane, conversationId: lane.conversationId,
@@ -397,14 +445,16 @@ form.addEventListener('submit', event => {
 
 async function runGeneration(request: NonNullable<typeof lastRun>) {
   if (controller || remixLoading) return;
+  window.clearTimeout(choiceTimer);
   lastRun = request;
   const run = new AbortController();
   controller = run;
   choosingVariation = request.mode === 'variations';
   race.checked = request.mode === 'race';
-  variations.checked = choosingVariation;
-  variationsGrid.hidden = !choosingVariation;
-  lanesElement.hidden = choosingVariation;
+  setVariations(choosingVariation);
+  variationsStrip.hidden = !choosingVariation;
+  lanesElement.hidden = false;
+  for (const lane of variantLanes) lane.root.classList.toggle('chosen', false);
   compare.root.hidden = !race.checked;
   lanesElement.classList.toggle('is-racing', race.checked);
   const started = performance.now();
@@ -507,7 +557,10 @@ async function runGeneration(request: NonNullable<typeof lastRun>) {
   clearInterval(timer);
   if (controller !== run) return;
   controller = null;
-  if (succeeded) prompt.value = '';
+  if (succeeded) {
+    prompt.value = '';
+    for (const lane of selected) element<HTMLInputElement>('.remix-prompt', lane.root).value = '';
+  }
   window.clearInterval(retryTimer);
   if (selected.some(lane => lane.retryAt > Date.now())) retryTimer = window.setInterval(() => {
     updateControls();
@@ -534,9 +587,10 @@ newButton.addEventListener('click', () => {
   controller = null;
   remixLoading = false;
   window.clearInterval(retryTimer);
+  window.clearTimeout(choiceTimer);
   lastRun = null;
   choosingVariation = false;
-  variationsGrid.hidden = true;
+  variationsStrip.hidden = true;
   lanesElement.hidden = false;
   element('#load-error').hidden = true;
   history.replaceState(null, '', location.pathname);
@@ -546,6 +600,8 @@ newButton.addEventListener('click', () => {
     lane.phase = 'idle';
     lane.retryable = false;
     lane.conversationId = crypto.randomUUID();
+    lane.root.classList.toggle('chosen', false);
+    element<HTMLInputElement>('.remix-prompt', lane.root).value = '';
     lane.html = lane.text = lane.error = '';
     lane.errorKind = null;
     lane.soloRevision = 0;
@@ -576,9 +632,9 @@ for (const example of examples) {
 prompt.addEventListener('input', updateControls);
 race.addEventListener('change', () => {
   if (race.checked) {
-    variations.checked = false;
+    setVariations(false);
     choosingVariation = false;
-    variationsGrid.hidden = true;
+    variationsStrip.hidden = true;
     lanesElement.hidden = false;
     syncRaceContexts();
   }
@@ -587,8 +643,9 @@ race.addEventListener('change', () => {
   updateControls();
 });
 
-variations.addEventListener('change', () => {
-  if (variations.checked) {
+variations.addEventListener('click', () => {
+  setVariations(!variationsOn());
+  if (variationsOn()) {
     race.checked = false;
     compare.root.hidden = true;
     lanesElement.classList.toggle('is-racing', false);
@@ -602,6 +659,7 @@ getConfig().then(config => {
   variations.disabled = !variantsEnabled;
   element('.variations-control').hidden = !config.variantsEnabled;
   prompt.maxLength = Math.min(500, config.maxPromptChars);
+  for (const lane of generationLanes) element<HTMLInputElement>('.remix-prompt', lane.root).maxLength = prompt.maxLength;
   if (!config.compareEnabled) return;
   element('#race-control').hidden = false;
   const label = config.compareLabel || 'Comparison';
@@ -659,9 +717,14 @@ const loadMore = element<HTMLButtonElement>('#load-more');
 function galleryCard(app: AppSummary) {
   const card = document.createElement('article');
   card.className = 'gallery-card';
-  card.innerHTML = `<div class="gallery-preview"><button class="preview-trigger" type="button">↯ <span>Try live preview</span></button></div><div class="gallery-copy"><h3></h3><p></p><a target="_blank" rel="noopener noreferrer">Open app ↗</a></div>`;
+  card.innerHTML = `<div class="gallery-preview"><button class="preview-trigger" type="button"><span class="shutter" aria-hidden="true"></span><span>Try live preview</span></button></div><div class="gallery-copy"><a target="_blank" rel="noopener noreferrer"><h3></h3></a><time></time></div>`;
   element('h3', card).textContent = app.title || 'Untitled app';
-  element('p', card).textContent = app.prompt;
+  element<HTMLAnchorElement>('a', card).title = app.prompt;
+  const age = Math.max(0, Math.floor((Date.now() - app.createdAt) / 1000));
+  const time = element<HTMLTimeElement>('time', card);
+  time.dateTime = new Date(app.createdAt).toISOString();
+  time.textContent = age < 60 ? 'now' : age < 3600 ? `${Math.floor(age / 60)}m` : age < 86400 ? `${Math.floor(age / 3600)}h` : `${Math.floor(age / 86400)}d`;
+  time.title = new Date(app.createdAt).toLocaleString();
   element<HTMLAnchorElement>('a', card).href = `/a/${encodeURIComponent(app.id)}`;
   const trigger = element<HTMLButtonElement>('.preview-trigger', card);
   trigger.setAttribute('aria-label', `Try live preview of ${app.title || 'Untitled app'}`);
@@ -699,6 +762,7 @@ function renderGalleryState() {
   loadMore.disabled = gallery.loading;
   loadMore.hidden = gallery.loaded && gallery.nextCursor === null && !gallery.error;
   loadMore.textContent = gallery.loading ? 'Loading…' : gallery.error ? 'Retry' : 'Load more';
+  element('#gallery-message').classList.toggle('is-error', Boolean(gallery.error));
   element('#gallery-message').textContent = gallery.error || (gallery.loading ? 'Loading community apps…' :
     gallery.loaded && !gallery.items.length ? 'The gallery is waiting for its first app. Make something and share it.' : '');
 }

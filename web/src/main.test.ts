@@ -23,13 +23,26 @@ class Element {
   title = '';
   srcdoc = '';
   textContent = '';
+  innerHTML = '';
+  className = '';
   contentWindow = {};
-  classList = { toggle() {}, add() {} };
+  classList = {
+    contains: (name: string) => this.className.split(' ').includes(name),
+    toggle: (name: string, force = !this.classList.contains(name)) => {
+      const classes = new Set(this.className.split(' ').filter(Boolean));
+      if (force) classes.add(name);
+      else classes.delete(name);
+      this.className = [...classes].join(' ');
+      return force;
+    },
+    add: (name: string) => { this.classList.toggle(name, true); },
+  };
   querySelector(selector: string): Element {
     if (!this.children.has(selector)) {
       const child = new Element();
       child.parent = this;
       if (selector === 'iframe') child.setAttribute('sandbox', 'allow-scripts');
+      if (selector === '#variations') child.setAttribute('aria-pressed', 'false');
       this.children.set(selector, child);
     }
     return this.children.get(selector)!;
@@ -53,6 +66,7 @@ class Element {
   }
   focus() {}
   select() {}
+  requestSubmit() { return this.handlers.get('submit')!({ preventDefault() {} }); }
 }
 
 interface TestLane {
@@ -91,9 +105,10 @@ function app(hidden = false, overrides: Record<string, unknown> = {}) {
     }),
     window: {
       clearInterval() {},
+      matchMedia: () => ({ matches: false }),
       addEventListener: (type: string, handler: (event: any) => void) => handlers.set(type, handler),
       setTimeout: (callback: () => void, delay: number) => {
-        assert.ok(delay === 6000 || delay === 4000);
+        assert.ok(delay === 6000 || delay === 4000 || delay === 550 || delay === 0);
         timers.set(++nextTimer, callback);
         return nextTimer;
       },
@@ -109,9 +124,14 @@ function app(hidden = false, overrides: Record<string, unknown> = {}) {
     run(code: string) { return runInContext(code, context); },
     variants: runInContext('variantLanes', context) as TestLane[],
     choose(index: number) { context.index = index; runInContext('chooseVariation(variantLanes[index])', context); },
+    completeChoice() {
+      const id = runInContext('choiceTimer', context);
+      timers.get(id)!();
+      timers.delete(id);
+    },
     variations(checked: boolean) {
-      document.querySelector('#variations').checked = checked;
-      document.querySelector('#variations').handlers.get('change')!({});
+      const toggle = document.querySelector('#variations');
+      if ((toggle.getAttribute('aria-pressed') === 'true') !== checked) toggle.handlers.get('click')!({});
     },
     preview(html: string) {
       context.html = html;
@@ -257,20 +277,29 @@ test('Race toggles preserve completed comparison results until a solo remix chan
 
 test('four variations fan out into isolated previews and selection becomes the saved main app', async () => {
   const ui = app();
-  assert.equal(ui.document.querySelector('#variations').checked, false);
+  assert.equal(ui.document.querySelector('#variations').getAttribute('aria-pressed'), 'false');
   ui.variations(true);
+  assert.equal(ui.document.querySelector('#variations').getAttribute('aria-pressed'), 'true');
   const pending = ui.start();
   assert.equal(ui.generations.length, 1);
   const generation = ui.generations[0];
   assert.equal(generation.body.variants, 4);
   generation.onEvent({ type: 'queue', position: 3 });
-  for (const lane of ui.variants) assert.equal(lane.root.querySelector('.lane-status').textContent, "You're #3 in line");
+  for (const lane of ui.variants) {
+    assert.equal(lane.root.querySelector('.lane-status').textContent, "You're #3 in line");
+    assert.equal(lane.root.getAttribute('data-state'), 'queued');
+  }
   generation.onEvent({ type: 'queue', position: 0 });
   for (const index of [3, 0, 2, 1]) {
     generation.onEvent({ type: 'status', variant: index, phase: 'waiting_model' });
     assert.match(ui.variants[index].root.querySelector('.lane-status').textContent, /Waiting for Cerebras/);
     generation.onEvent({ type: 'delta', variant: index, text: `<html><body>Variation ${index}</body></html>` });
+    ui.run(`renderLane(variantLanes[${index}])`);
+    assert.equal(ui.variants[index].root.getAttribute('data-state'), 'developing');
+    assert.match(ui.variants[index].root.querySelector('.code-rain').textContent, /Variation/);
     generation.onEvent({ type: 'done', variant: index, stats, appId: `saved-${index}` });
+    assert.equal(ui.variants[index].root.getAttribute('data-state'), 'done');
+    assert.equal(ui.variants[index].root.querySelector('.frame-metrics').textContent, '200 tok/s · 0.10 s');
   }
   generation.onEvent({ type: 'end' });
   generation.resolve();
@@ -282,11 +311,18 @@ test('four variations fan out into isolated previews and selection becomes the s
     assert.ok(lane.iframe.srcdoc.includes('blinkPreview'));
   }
   ui.choose(2);
+  assert.equal(ui.variants[2].root.classList.contains('chosen'), true);
+  assert.equal(ui.variants[0].root.classList.contains('chosen'), false);
+  assert.match(ui.variants[2].root.innerHTML, /<svg class="circle"[^>]*>[\s\S]*?<path d=/);
+  assert.equal(ui.document.querySelector('#variations-strip').hidden, false);
+  ui.completeChoice();
+  assert.equal(ui.document.querySelector('#variations').getAttribute('aria-pressed'), 'false');
   assert.equal(ui.cerebras.appId, 'saved-2');
   assert.equal(ui.cerebras.html, '<html><body>Variation 2</body></html>');
   assert.deepEqual(ui.cerebras.stats, stats);
   assert.ok(ui.cerebras.iframe.srcdoc.includes('Variation 2'));
-  assert.equal(ui.document.querySelector('#variations-grid').hidden, true);
+  assert.equal(ui.document.querySelector('#variations-strip').hidden, true);
+  assert.equal(ui.document.querySelector('#lanes').hidden, false);
   assert.equal((ui.cerebras.root.querySelector('.share') as any).disabled, false);
   const remix = ui.start();
   const next = ui.generations.at(-1)!;
@@ -374,7 +410,29 @@ test('gallery route shows the full gallery and hides the builder', () => {
   const ui = app(false, { location: { pathname: '/gallery', search: '', origin: 'https://blink.test' } });
   assert.equal(ui.document.querySelector('#builder').hidden, true);
   assert.equal(ui.document.querySelector('#gallery-link').hidden, true);
-  assert.equal(ui.document.querySelector('#gallery-title').textContent, 'The Blink gallery');
+  assert.match(ui.document.querySelector('#app').innerHTML, /id="gallery-title">Contact sheet<\/h2>/);
+});
+
+test('choosing a variant adds the chosen class and grease circle before expanding', () => {
+  const ui = app();
+  ui.run("choosingVariation = true; variationsStrip.hidden = false");
+  for (const [index, lane] of ui.variants.entries()) {
+    lane.html = `<html>Take ${index}</html>`;
+    lane.phase = 'done';
+  }
+  ui.choose(0);
+  assert.equal(ui.variants[0].root.classList.contains('chosen'), true);
+  assert.match(ui.variants[0].root.innerHTML, /<svg class="circle"[^>]*>[\s\S]*?<path d=/);
+  assert.equal(ui.document.querySelector('#variations-strip').hidden, false);
+  assert.equal(ui.cerebras.html, '');
+  // A second pick replaces the pending choice and restarts its drawing time.
+  ui.choose(1);
+  assert.equal(ui.variants[0].root.classList.contains('chosen'), false);
+  assert.equal(ui.variants[1].root.classList.contains('chosen'), true);
+  assert.equal(ui.timers.size, 1);
+  ui.completeChoice();
+  assert.equal(ui.cerebras.html, '<html>Take 1</html>');
+  assert.equal(ui.document.querySelector('#variations-strip').hidden, true);
 });
 
 // This is the security boundary for every srcdoc write, including future preview paths.
@@ -501,6 +559,26 @@ test('a successful remix replaces the saved app only on completion', async () =>
   assert.equal(ui.cerebras.html, '<html>Replacement</html>');
   assert.equal(ui.cerebras.appId, 'replacement');
   assert.notEqual(ui.cerebras.iframe, iframe);
+});
+
+test('workspace Remix uses the existing generation flow and saved parent', async () => {
+  const ui = app();
+  ui.preview('<html>Original</html>');
+  ui.cerebras.appId = 'original';
+  ui.cerebras.phase = 'done';
+  const input = ui.cerebras.root.querySelector('.remix-prompt');
+  input.value = 'Add a streak counter';
+  ui.cerebras.root.querySelector('.remix-form').handlers.get('submit')!({ preventDefault() {} });
+  const generation = ui.generations[0];
+  assert.equal(generation.body.prompt, 'Add a streak counter');
+  assert.equal(generation.body.remixOf, 'original');
+  assert.equal(generation.body.variants, 1);
+  generation.onEvent({ type: 'delta', variant: 0, text: '<html>With streaks</html>' });
+  generation.onEvent({ type: 'done', variant: 0, stats, appId: 'remixed' });
+  generation.resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ui.cerebras.appId, 'remixed');
+  assert.equal(input.value, '');
 });
 
 test('a gallery refresh ignores an older page that finishes after sharing', async () => {
