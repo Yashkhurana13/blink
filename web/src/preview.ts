@@ -30,7 +30,10 @@ export function buildPreviewDoc(html: string, token: string): string {
       window.requestAnimationFrame(ready);
     });
   })();</script>`;
-  const opening = /<head\b[^>]*>/i.exec(html) ?? /<html\b[^>]*>/i.exec(html);
+  const policy = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; media-src data: blob:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'">`;
+  const head = /<head\b[^>]*>/i.exec(html);
+  const opening = head ?? /<html\b[^>]*>/i.exec(html);
   const index = opening ? opening.index + opening[0].length : 0;
-  return html.slice(0, index) + script + html.slice(index);
+  const bootstrap = policy + script;
+  return html.slice(0, index) + (head ? bootstrap : `<head>${bootstrap}</head>`) + html.slice(index);
 }

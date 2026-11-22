@@ -8,7 +8,7 @@ import { extractHtml } from './extract.ts';
 import { syncRaceLanes } from './lanes.ts';
 import { buildPreviewDoc } from './preview.ts';
 import * as state from './state.ts';
-import { ApiError } from './api.ts';
+import { ApiError, generate } from './api.ts';
 
 // Exercise main's event handlers without a browser or a new DOM dependency.
 class Element {
@@ -38,7 +38,9 @@ class Element {
   setAttribute(name: string, value: string) { this.attributes.set(name, value); }
   getAttribute(name: string) { return this.attributes.get(name) ?? null; }
   removeAttribute(name: string) { this.attributes.delete(name); }
-  append(child: Element) { child.parent = this; }
+  appended: Element[] = [];
+  append(child: Element) { child.parent = this; this.appended.push(child); }
+  replaceChildren() { this.appended.forEach(child => { child.parent = null; }); this.appended = []; }
   addEventListener(type: string, handler: (event: any) => any) { this.handlers.set(type, handler); }
   replaceWith(next: Element) {
     const parent = this.parent;
@@ -81,7 +83,7 @@ function app(hidden = false, overrides: Record<string, unknown> = {}) {
   const context = createContext({
     ...state, ApiError, Date, location: { pathname: '/', search: '', origin: 'https://blink.test' }, history: { replaceState() {} },
     getGallery: async () => ({ items: [], nextCursor: null }),
-    document, crypto: { randomUUID: () => `id-${++nextId}` }, performance, AbortController,
+    document, crypto: { randomUUID: () => `00000000-0000-4000-8000-${String(++nextId).padStart(12, '0')}` }, performance, AbortController,
     requestAnimationFrame: () => 1, clearInterval() {}, extractHtml, syncRaceLanes, buildPreviewDoc,
     getConfig: async () => ({ compareEnabled: true, variantsEnabled: true, maxPromptChars: 500 }),
     generate: (body: unknown, onEvent: (event: GenerateEvent) => void) => new Promise<void>(resolve => {
@@ -321,7 +323,7 @@ test('remix query loads raw HTML text into an instrumented fresh sandbox, then s
   generation.resolve();
   await pending;
   assert.equal(ui.cerebras.root.querySelector('.retry').hidden, false);
-  // Retry uses the original parent even after the failed run cleared the lane ID.
+  // Retry keeps the original parent after a failed run.
   ui.cerebras.root.querySelector('.retry').handlers.get('click')!({});
   assert.equal(ui.generations[1].body.remixOf, 'shared-id');
   ui.generations[1].resolve();
@@ -373,4 +375,149 @@ test('gallery route shows the full gallery and hides the builder', () => {
   assert.equal(ui.document.querySelector('#builder').hidden, true);
   assert.equal(ui.document.querySelector('#gallery-link').hidden, true);
   assert.equal(ui.document.querySelector('#gallery-title').textContent, 'The Blink gallery');
+});
+
+// This is the security boundary for every srcdoc write, including future preview paths.
+test('every production srcdoc assignment goes through buildPreviewDoc', () => {
+  const files = ts.sys.readDirectory(new URL('.', import.meta.url).pathname, ['.ts', '.html']);
+  let assignments = 0;
+  for (const file of files.filter(file => !file.endsWith('.test.ts'))) {
+    const text = readFileSync(file, 'utf8');
+    for (const match of text.matchAll(/\.srcdoc\s*=\s*([^;]+);/g)) {
+      assignments++;
+      assert.match(match[1], /^buildPreviewDoc\(/, file);
+    }
+    assert.doesNotMatch(text.replace(/\.srcdoc\s*=\s*buildPreviewDoc\([^;]+;/g, ''), /setAttribute\(\s*['"]srcdoc['"]|srcdoc\s*=/i, file);
+  }
+  assert.equal(assignments, 1);
+});
+
+for (const failure of ['429', '503', 'network', 'stream', 'invalid HTML']) {
+  test(`remix failure (${failure}) keeps the saved preview, actions and next remix parent`, async t => {
+    if (failure === '429' || failure === '503') {
+      t.mock.method(globalThis, 'fetch', async () => Response.json({ retryAfterSec: 1 }, { status: Number(failure) }));
+    }
+    const ui = app(false, failure === '429' || failure === '503' ? { generate } :
+      failure === 'network' ? { generate: async () => { throw new Error('Offline'); } } : {});
+    ui.preview('<html>Original app</html>');
+    ui.cerebras.appId = 'original';
+    ui.cerebras.phase = 'done';
+    ui.cerebras.stats = stats;
+    const original = ui.cerebras.iframe;
+    const pending = ui.start();
+    assert.equal(ui.cerebras.html, '<html>Original app</html>');
+    assert.equal(ui.cerebras.appId, 'original');
+    assert.equal(ui.cerebras.iframe, original);
+    if (failure === 'stream' || failure === 'invalid HTML') {
+      const generation = ui.generations[0];
+      generation.onEvent({ type: 'delta', variant: 0, text: failure === 'stream' ? '<html>Unfinished replacement</html>' : 'not an app' });
+      assert.equal(ui.cerebras.html, '<html>Original app</html>');
+      assert.equal(ui.cerebras.appId, 'original');
+      generation.onEvent(failure === 'stream'
+        ? { type: 'error', variant: 0, message: 'Provider failed', retryable: true }
+        : { type: 'done', variant: 0, stats, appId: null });
+      generation.resolve();
+    }
+    await pending;
+    assert.equal(ui.cerebras.iframe, original);
+    assert.equal(ui.cerebras.html, '<html>Original app</html>');
+    assert.equal(ui.cerebras.appId, 'original');
+    assert.deepEqual(ui.cerebras.stats, stats);
+    assert.equal(ui.cerebras.phase, 'done');
+    assert.ok(ui.cerebras.error);
+    assert.equal((ui.cerebras.root.querySelector('.share') as any).disabled, false);
+    assert.equal((ui.cerebras.root.querySelector('.download') as any).disabled, false);
+    ui.run('generate = (body) => { globalThis.nextBody = body; return Promise.resolve(); }');
+    await ui.start();
+    assert.equal(ui.run('nextBody.remixOf'), 'original');
+  });
+}
+
+test('race requests share a fresh runId and retain their own remix parents', async () => {
+  const ui = app();
+  ui.race(true);
+  ui.preview('<html>Cerebras</html>');
+  ui.cerebras.appId = 'parent-cerebras';
+  ui.cerebras.phase = 'done';
+  ui.run("setPreview(compare, '<html>Compare</html>')");
+  ui.compare.appId = 'parent-compare';
+  ui.compare.phase = 'done';
+  let previousId = '';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const pending = ui.start();
+    const lanes = ui.generations.slice(attempt * 2);
+    const runId = lanes[0].body.runId;
+    assert.match(runId, /^[a-f0-9]{32}$/);
+    assert.ok(runId.length <= 64);
+    assert.notEqual(runId, previousId);
+    assert.equal(lanes[1].body.runId, runId);
+    assert.deepEqual(lanes.map(lane => lane.body.remixOf), ['parent-cerebras', 'parent-compare']);
+    lanes.forEach(lane => {
+      lane.onEvent({ type: 'error', variant: 0, message: 'Busy', retryable: true });
+      lane.resolve();
+    });
+    await pending;
+    previousId = runId;
+  }
+});
+
+test('sharing reloads the first gallery page and replaces previously loaded cards', async () => {
+  const cursors: (string | null)[] = [];
+  let shared = false;
+  const item = (id: string) => ({ id, title: id, prompt: 'App', createdAt: 1 });
+  const ui = app(false, {
+    getGallery: async (cursor: string | null) => {
+      cursors.push(cursor);
+      return { items: shared ? [item('new'), item('old')] : [item(cursor ? 'older' : 'old')], nextCursor: shared ? null : '10' };
+    },
+    shareApp: async () => { shared = true; return '/a/new'; },
+    navigator: { clipboard: { writeText: async () => {} } },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  await ui.run('loadGalleryPage()');
+  ui.cerebras.appId = 'new';
+  await ui.run('shareLane(cerebras)');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(cursors, [null, '10', null]);
+  const grid = ui.document.querySelector('#gallery-grid');
+  assert.deepEqual(grid.appended.map(card => card.querySelector('h3').textContent), ['new', 'old']);
+});
+
+test('a successful remix replaces the saved app only on completion', async () => {
+  const ui = app();
+  ui.preview('<html>Original</html>');
+  ui.cerebras.appId = 'original';
+  ui.cerebras.phase = 'done';
+  const iframe = ui.cerebras.iframe;
+  const pending = ui.start();
+  const generation = ui.generations[0];
+  generation.onEvent({ type: 'delta', variant: 0, text: '<html>Replacement</html>' });
+  assert.equal(ui.cerebras.iframe, iframe);
+  assert.equal(ui.cerebras.html, '<html>Original</html>');
+  assert.equal(ui.cerebras.appId, 'original');
+  generation.onEvent({ type: 'done', variant: 0, stats, appId: 'replacement' });
+  generation.resolve();
+  await pending;
+  assert.equal(ui.cerebras.html, '<html>Replacement</html>');
+  assert.equal(ui.cerebras.appId, 'replacement');
+  assert.notEqual(ui.cerebras.iframe, iframe);
+});
+
+test('a gallery refresh ignores an older page that finishes after sharing', async () => {
+  let resolveOld!: (page: unknown) => void;
+  let calls = 0;
+  const item = (id: string) => ({ id, title: id, prompt: 'App', createdAt: 1 });
+  const ui = app(false, {
+    getGallery: () => ++calls === 1 ? new Promise(resolve => { resolveOld = resolve; }) :
+      Promise.resolve({ items: [item('new')], nextCursor: null }),
+    shareApp: async () => '/a/new',
+    navigator: { clipboard: { writeText: async () => {} } },
+  });
+  ui.cerebras.appId = 'new';
+  await ui.run('shareLane(cerebras)');
+  resolveOld({ items: [item('old')], nextCursor: '10' });
+  await new Promise(resolve => setImmediate(resolve));
+  const grid = ui.document.querySelector('#gallery-grid');
+  assert.deepEqual(grid.appended.map(card => card.querySelector('h3').textContent), ['new']);
+  assert.equal(ui.document.querySelector('#load-more').hidden, true);
 });

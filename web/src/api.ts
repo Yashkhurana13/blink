@@ -4,6 +4,7 @@ export interface GenerateBody {
   prompt: string;
   variants?: 1 | 4;
   remixOf?: string;
+  runId?: string;
   conversationId?: string;
   lane?: Lane;
 }

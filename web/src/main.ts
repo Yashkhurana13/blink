@@ -357,6 +357,7 @@ async function shareLane(lane: LaneState) {
   updateControls();
   try {
     const links = buildShareLinks(location.origin, await shareApp(id));
+    void loadGalleryPage(true);
     if (lane.appId !== id) return;
     element<HTMLAnchorElement>('.post-x', lane.root).href = links.x;
     element<HTMLAnchorElement>('.open-share', lane.root).href = links.url;
@@ -408,10 +409,14 @@ async function runGeneration(request: NonNullable<typeof lastRun>) {
   lanesElement.classList.toggle('is-racing', race.checked);
   const started = performance.now();
   const selected = activeLanes();
+  const previous = new Map(selected.filter(lane => lane.html).map(lane => [lane, {
+    text: lane.text, stats: lane.stats, started: lane.started, firstDelta: lane.firstDelta,
+    phase: lane.phase,
+  }]));
+  const runId = request.mode === 'race' ? crypto.randomUUID().replace(/-/g, '') : undefined;
   for (const lane of selected) {
-    clearLanePreview(lane);
-    lane.html = lane.text = lane.error = '';
-    lane.appId = null;
+    if (!previous.has(lane)) clearLanePreview(lane);
+    lane.text = lane.error = '';
     lane.phase = 'idle';
     lane.position = 0;
     lane.waitingAt = null;
@@ -422,7 +427,6 @@ async function runGeneration(request: NonNullable<typeof lastRun>) {
     lane.firstDelta = null;
     lane.started = started;
     lane.streaming = true;
-    element('.share-links', lane.root).hidden = true;
     renderLane(lane);
   }
   updateControls();
@@ -435,7 +439,7 @@ async function runGeneration(request: NonNullable<typeof lastRun>) {
     const targets = choosingVariation ? variantLanes : [selected[index]];
     let state = createGeneration(targets.length);
     try {
-      await generate(body, event => {
+      await generate(runId ? { ...body, runId } : body, event => {
         if (controller !== run) return;
         state = reduceGeneration(state, event, performance.now());
         targets.forEach((lane, variant) => {
@@ -448,7 +452,7 @@ async function runGeneration(request: NonNullable<typeof lastRun>) {
           if (event.type === 'delta') {
             if (event.text && lane.firstDelta === null) lane.firstDelta = performance.now();
             lane.text = next.text;
-            if (!lane.previewSet) {
+            if (!previous.has(lane) && !lane.previewSet) {
               const html = extractHtml(lane.text);
               if (html !== null) setPreview(lane, html);
             }
@@ -462,16 +466,16 @@ async function runGeneration(request: NonNullable<typeof lastRun>) {
               lane.errorKind = 'generation';
               lane.retryable = next.retryable;
             } else {
-              lane.stats = next.stats;
-              lane.appId = next.appId;
               const html = extractHtml(lane.text);
               if (html === null) {
                 lane.error = 'No complete HTML app was returned. Please try again.';
                 lane.errorKind = 'generation';
                 lane.retryable = true;
                 lane.phase = 'error';
-                lane.appId = null;
               } else {
+                lane.stats = next.stats;
+                lane.appId = next.appId;
+                element('.share-links', lane.root).hidden = true;
                 if (html !== lane.html) setPreview(lane, html);
                 succeeded = true;
               }
@@ -494,6 +498,8 @@ async function runGeneration(request: NonNullable<typeof lastRun>) {
     } finally {
       if (controller === run) for (const lane of targets) {
         lane.streaming = false;
+        const saved = previous.get(lane);
+        if (saved && lane.phase !== 'done') Object.assign(lane, saved);
         renderLane(lane);
       }
     }
@@ -697,17 +703,28 @@ function renderGalleryState() {
     gallery.loaded && !gallery.items.length ? 'The gallery is waiting for its first app. Make something and share it.' : '');
 }
 
-async function loadGalleryPage() {
+async function loadGalleryPage(refresh = false) {
+  if (refresh) {
+    gallery = createGallery();
+    galleryGrid.replaceChildren();
+    for (let index = lanes.length - 1; index >= generationLanes.length; index--) {
+      resetPreviewWatch(lanes[index]);
+      lanes.splice(index, 1);
+    }
+  }
   const next = beginGalleryPage(gallery);
   if (next === gallery) return;
   gallery = next;
+  const loading = gallery;
   renderGalleryState();
   try {
     const page = await getGallery(gallery.nextCursor);
+    if (gallery !== loading) return;
     const count = gallery.items.length;
     gallery = finishGalleryPage(gallery, page);
     for (const app of gallery.items.slice(count)) galleryGrid.append(galleryCard(app));
   } catch (error) {
+    if (gallery !== loading) return;
     gallery = failGalleryPage(gallery, error instanceof Error ? error.message : 'The gallery couldn’t be loaded. Please try again.');
   }
   renderGalleryState();
