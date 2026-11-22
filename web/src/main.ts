@@ -38,13 +38,10 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <div class="examples" aria-label="Example prompts"></div>
     </section>
     <div id="empty-film" class="empty-film strip">
-      <div class="blank-frames" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+      <div class="blank-frames" aria-hidden="true">${['Classic', 'Bold', 'Minimal', 'Retro'].map((name, index) => `<div><span class="blank-exposure"></span><span class="frame-edge">${index + 1}A ▸ ${name}</span></div>`).join('')}</div>
       <p>Your four versions will develop here.</p>
     </div>
-    <div class="workspace-heading">
-      <p>From idea to interaction<span class="workspace-detail"> · live workspace</span></p>
-      <label id="race-control" class="race-control" hidden><input id="race" type="checkbox"><span>Race mode</span><span class="toggle" aria-hidden="true"></span></label>
-    </div>
+    <label id="race-control" class="race-control" hidden><input id="race" type="checkbox"><span>Race mode</span><span class="toggle" aria-hidden="true"></span></label>
     <section id="variations-strip" aria-label="Film strip" hidden>
       <div class="strip-label"><b id="strip-title">Four variations</b><span id="roll-status" role="status">Pick a frame to keep going</span></div>
       <div id="variations-grid" class="variations-grid strip" aria-label="Four variations"></div>
@@ -845,7 +842,7 @@ const loadMore = element<HTMLButtonElement>('#load-more');
 function galleryCard(app: AppSummary) {
   const card = document.createElement('article');
   card.className = 'gallery-card';
-  card.innerHTML = `<div class="gallery-preview"><button class="preview-trigger" type="button"><span class="shutter" aria-hidden="true"></span><span>Try live preview</span></button></div><div class="gallery-copy"><a target="_blank" rel="noopener noreferrer"><h3></h3></a><time></time></div>`;
+  card.innerHTML = `<a class="gallery-preview" target="_blank" rel="noopener noreferrer"></a><div class="gallery-copy"><a target="_blank" rel="noopener noreferrer"><h3></h3></a><time></time></div>`;
   element('h3', card).textContent = app.title || 'Untitled app';
   element<HTMLAnchorElement>('a', card).title = app.prompt;
   const age = Math.max(0, Math.floor((Date.now() - app.createdAt) / 1000));
@@ -854,35 +851,16 @@ function galleryCard(app: AppSummary) {
   time.textContent = age < 60 ? 'now' : age < 3600 ? `${Math.floor(age / 60)}m` : age < 86400 ? `${Math.floor(age / 3600)}h` : `${Math.floor(age / 86400)}d`;
   time.title = new Date(app.createdAt).toLocaleString();
   element<HTMLAnchorElement>('a', card).href = `/a/${encodeURIComponent(app.id)}`;
-  const trigger = element<HTMLButtonElement>('.preview-trigger', card);
-  trigger.setAttribute('aria-label', `Try live preview of ${app.title || 'Untitled app'}`);
-  let loading = false;
-  let preview: LaneState | null = null;
-  const showPreview = async () => {
-    if (loading || preview) return;
-    loading = true;
-    trigger.textContent = 'Loading preview…';
-    try {
-      const html = await getRawHtml(app.id);
-      if (extractHtml(html) === null) throw new Error('Preview unavailable');
-      // Only create the frame after hover, keyboard focus, or an explicit tap.
-      preview = createLane(`gallery-${app.id}`, app.title, element('.gallery-preview', card));
-      preview.root.classList.add('gallery-mini');
-      preview.text = html;
-      preview.phase = 'done';
-      lanes.push(preview);
-      setPreview(preview, html);
-      renderLane(preview);
-      trigger.hidden = true;
-    } catch {
-      trigger.textContent = 'Preview unavailable · Tap to retry';
-    } finally {
-      loading = false;
-    }
-  };
-  trigger.addEventListener('pointerenter', () => { void showPreview(); });
-  trigger.addEventListener('focus', () => { void showPreview(); });
-  trigger.addEventListener('click', () => { void showPreview(); });
+  const thumbnail = element<HTMLAnchorElement>('.gallery-preview', card);
+  thumbnail.href = `/a/${encodeURIComponent(app.id)}`;
+  thumbnail.setAttribute('aria-label', app.title || 'Untitled app');
+  const preview = document.createElement('iframe');
+  preview.setAttribute('src', `/raw/${encodeURIComponent(app.id)}`);
+  preview.setAttribute('loading', 'lazy');
+  preview.setAttribute('referrerpolicy', 'no-referrer');
+  preview.setAttribute('title', `${app.title || 'Untitled app'} preview`);
+  preview.setAttribute('tabindex', '-1');
+  thumbnail.append(preview);
   return card;
 }
 
@@ -912,9 +890,17 @@ async function loadGalleryPage(refresh = false) {
   try {
     const page = await getGallery(gallery.nextCursor);
     if (gallery !== loading) return;
-    const count = gallery.items.length;
     gallery = finishGalleryPage(gallery, page);
-    for (const app of gallery.items.slice(count)) galleryGrid.append(galleryCard(app));
+    galleryGrid.replaceChildren();
+    for (const app of gallery.items) galleryGrid.append(galleryCard(app));
+    if (!galleryOnly) {
+      for (let index = gallery.items.length; index < 6; index++) {
+        const blank = document.createElement('div');
+        blank.className = 'gallery-unexposed';
+        blank.setAttribute('aria-hidden', 'true');
+        galleryGrid.append(blank);
+      }
+    }
   } catch (error) {
     if (gallery !== loading) return;
     gallery = failGalleryPage(gallery, error instanceof Error ? error.message : 'The gallery couldn’t be loaded. Please try again.');

@@ -552,27 +552,19 @@ test('sharing copies the full URL and exposes Post on X and Open', async () => {
   assert.equal(new URL((root.querySelector('.post-x') as any).href).searchParams.get('url'), copied[0]);
 });
 
-test('gallery cards create no frame until interaction and reuse the preview safety flow', async () => {
-  let rawFetches = 0;
-  const ui = app(false, {
-    getRawHtml: async () => { rawFetches++; return '<html><body>Gallery app</body></html>'; },
-  });
+test('gallery cards link lazy non-interactive raw previews to the share page', () => {
+  const ui = app();
   const card = ui.run("galleryCard({ id: 'gallery-app', title: '<unsafe title>', prompt: '<unsafe prompt>', createdAt: 1 })") as Element;
-  assert.equal(rawFetches, 0);
-  assert.equal(card.querySelector('.gallery-preview').children.size, 0);
   assert.equal(card.querySelector('h3').textContent, '<unsafe title>');
-  const button = card.querySelector('.preview-trigger');
-  button.handlers.get('click')!({});
-  button.handlers.get('pointerenter')!({});
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(rawFetches, 1);
-  const preview = ui.run('lanes.at(-1)') as TestLane;
-  assert.equal(preview.iframe.getAttribute('sandbox'), 'allow-scripts');
-  assert.ok(preview.iframe.srcdoc.includes('blinkPreview'));
-  assert.ok(preview.iframe.srcdoc.includes('Gallery app'));
-  assert.equal(button.hidden, true);
-  ui.expire();
-  assert.match(preview.error, /didn't render/);
+  const thumbnail = card.querySelector('.gallery-preview');
+  assert.equal((thumbnail as any).href, '/a/gallery-app');
+  const preview = thumbnail.appended[0];
+  assert.equal(preview.getAttribute('src'), '/raw/gallery-app');
+  assert.equal(preview.getAttribute('loading'), 'lazy');
+  assert.equal(preview.getAttribute('referrerpolicy'), 'no-referrer');
+  assert.equal(preview.getAttribute('title'), '<unsafe title> preview');
+  assert.equal(preview.getAttribute('tabindex'), '-1');
+  assert.equal(preview.getAttribute('sandbox'), null);
 });
 
 test('gallery route shows the full gallery and hides the builder', () => {
@@ -729,7 +721,7 @@ test('sharing reloads the first gallery page and replaces previously loaded card
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(cursors, [null, '10', null]);
   const grid = ui.document.querySelector('#gallery-grid');
-  assert.deepEqual(grid.appended.map(card => card.querySelector('h3').textContent), ['new', 'old']);
+  assert.deepEqual(grid.appended.filter(card => card.className === 'gallery-card').map(card => card.querySelector('h3').textContent), ['new', 'old']);
 });
 
 test('a successful remix replaces the saved app only on completion', async () => {
@@ -787,7 +779,7 @@ test('a gallery refresh ignores an older page that finishes after sharing', asyn
   resolveOld({ items: [item('old')], nextCursor: '10' });
   await new Promise(resolve => setImmediate(resolve));
   const grid = ui.document.querySelector('#gallery-grid');
-  assert.deepEqual(grid.appended.map(card => card.querySelector('h3').textContent), ['new']);
+  assert.deepEqual(grid.appended.filter(card => card.className === 'gallery-card').map(card => card.querySelector('h3').textContent), ['new']);
   assert.equal(ui.document.querySelector('#load-more').hidden, true);
 });
 
@@ -1019,4 +1011,22 @@ test('voice input reports a synchronous start failure without losing typed text'
   assert.equal(mic.getAttribute('aria-pressed'), 'false');
   assert.match(ui.document.querySelector('#voice-status').textContent, /could not start/i);
   assert.equal(ui.document.querySelector('#prompt').value, 'Keep my idea');
+});
+
+test('home contact sheet pads to six exposures, while gallery keeps pagination', async () => {
+  for (const pathname of ['/', '/gallery']) {
+    const ui = app(false, {
+      location: { pathname, search: '', origin: 'https://blink.test' },
+      getGallery: async () => ({ items: [{ id: 'one', title: 'One', prompt: 'App', createdAt: 1 }], nextCursor: 'next' }),
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    const cards = ui.document.querySelector('#gallery-grid').appended;
+    assert.equal(cards.length, pathname === '/' ? 6 : 1);
+    for (const blank of cards.slice(1)) {
+      assert.equal(blank.className, 'gallery-unexposed');
+      assert.equal(blank.getAttribute('aria-hidden'), 'true');
+    }
+    assert.equal(ui.document.querySelector('#load-more').hidden, false);
+    assert.doesNotMatch(ui.document.querySelector('#app').innerHTML, /From idea to interaction|live workspace/i);
+  }
 });
