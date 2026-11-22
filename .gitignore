@@ -4,3 +4,5 @@ dist/
 .env
 data/
 samples/.breakout-check.txt
+logs/
+scratch-og/
