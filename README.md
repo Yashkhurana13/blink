@@ -33,7 +33,7 @@ Requires Node 24 and OpenClaw with Kimi K3.1 Pro on Cerebras configured.
    ```
 
 2. Start the gateway: `openclaw gateway --port 18789 --bind loopback`.
-3. Create `.env` with `OPENCLAW_BASE_URL=http://127.0.0.1:18789` and `OPENCLAW_GATEWAY_TOKEN=<your gateway token>`.
+3. Create `.env` with `OPENCLAW_BASE_URL=http://127.0.0.1:18789`, `OPENCLAW_GATEWAY_TOKEN=<your gateway token>` and `MAX_OUTPUT_TOKENS=16000` (Kimi's reasoning tokens count toward the output limit, so a full game can use 14K).
 4. Build and start Blink:
 
    ```bash
@@ -47,6 +47,10 @@ Requires Node 24 and OpenClaw with Kimi K3.1 Pro on Cerebras configured.
 ### Race mode (optional)
 
 Set `COMPARE_BASE_URL`, `COMPARE_API_KEY`, `COMPARE_MODEL` and `COMPARE_LABEL` (any OpenAI-compatible provider, for example a GPU host) and restart. A Race toggle appears, and both lanes get the same prompt at the same moment.
+
+## Public hosting
+
+`scripts/start-prod.sh` starts the OpenClaw gateway (loopback only), a Cloudflare tunnel and Blink, kept awake with `caffeinate`. With a named tunnel `blink` routed to your hostname (`cloudflared tunnel create blink`, `cloudflared tunnel route dns blink <host>`) the URL is permanent; otherwise it falls back to a temporary quick tunnel, which buffers streaming and is for testing only. Abuse controls: per-browser creator cookies, per-IP (IPv6 /64) hourly limits, a fair queue, a shared request and token budget matched to the Cerebras quota, CSP-sandboxed app serving, and report-based moderation (`ADMIN_TOKEN` enables the hide API).
 
 ## Scripts
 
