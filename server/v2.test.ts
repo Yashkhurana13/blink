@@ -332,8 +332,89 @@ test('does not retry a network failure after the first token or persist a partia
   const stream = await api.generate();
   assert.equal(calls, 1);
   assert.ok(stream.some(e => e.type === 'delta'));
-  assert.ok(stream.some(e => e.type === 'error' && e.retryable === true));
+  assert.deepEqual(stream.find(e => e.type === 'error'), {
+    type: 'error', variant: 0, retryable: true,
+    message: 'That app came out too long. Try a simpler idea, or build it up with remixes.',
+  });
   assert.ok(!stream.some(e => e.type === 'done'));
+});
+
+for (const ending of ['error', 'eof', 'length'] as const) {
+  test(`a streamed ${ending} failure ends every variant with the too-long message and no automatic retry`, async t => {
+    let calls = 0;
+    const api = setup(t, {}, (_req, res) => {
+      calls++;
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: HTML } }] })}\n\n`);
+      res.end(ending === 'error' ? 'data: {"error":{"message":"internal secret"}}\n\n'
+        : ending === 'length' ? 'data: {"choices":[{"finish_reason":"length"}]}\n\ndata: [DONE]\n\n' : '');
+    });
+    const stream = await api.generate({ prompt: 'clock', variants: 4 });
+    assert.equal(calls, 4);
+    assert.deepEqual(stream.filter(e => e.type === 'error').sort((a, b) => a.variant - b.variant), Array.from({ length: 4 }, (_, variant) => ({
+      type: 'error', variant, retryable: true,
+      message: 'That app came out too long. Try a simpler idea, or build it up with remixes.',
+    })));
+    assert.ok(!stream.some(e => e.type === 'done'));
+    const observer = new DatabaseSync(join(api.env.BLINK_DATA_DIR, 'blink.db'));
+    try { assert.equal(observer.prepare('SELECT COUNT(*) AS count FROM apps').get()!.count, 0); }
+    finally { observer.close(); }
+    assert.deepEqual(stream.at(-1), { type: 'end' });
+  });
+}
+
+for (const format of ['stream', 'response'] as const) {
+  test(`${format} reconciles a completion above 7000 tokens to actual prompt plus output usage`, async t => {
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 });
+    let calls = 0;
+    const api = setup(t, { TOKENS_PER_MIN: '25000' }, (_req, res) => {
+      calls++;
+      const usage = { prompt_tokens: 3789, completion_tokens: 8000 };
+      if (format === 'response') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: { content: HTML } }], usage }));
+      } else res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: HTML } }], usage })}\n\ndata: [DONE]\n\n`);
+    });
+    for (let i = 0; i < 2; i++) {
+      const stream = await api.generate();
+      assert.equal(stream.find(e => e.type === 'done')?.stats.outputTokens, 8000);
+    }
+    // 2 * 11789 actual tokens + a new reservation exceeds 25000. The second
+    // attempt fits only after the first reservation is reconciled downwards.
+    const third = await api.post('/api/generate', { prompt: 'third' });
+    await new Promise(setImmediate);
+    assert.equal(calls, 2);
+    t.mock.timers.tick(59_999);
+    await new Promise(setImmediate);
+    assert.equal(calls, 2);
+    t.mock.timers.tick(1);
+    assert.ok(events(await third.text()).some(e => e.type === 'done'));
+    assert.equal(calls, 3);
+  });
+}
+
+test('twelve large completions wait rather than exceed TOKENS_PER_MIN within a minute', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 });
+  const starts: number[] = [];
+  const api = setup(t, { TOKENS_PER_MIN: '90000' }, (_req, res) => {
+    starts.push(Date.now());
+    res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: HTML } }], usage: { prompt_tokens: 4000, completion_tokens: 9000 } })}\n\ndata: [DONE]\n\n`);
+  });
+  for (let i = 0; i < 6; i++) await api.generate();
+  const remaining = [];
+  for (let i = 0; i < 6; i++) remaining.push(await api.post('/api/generate', { prompt: 'clock' }, `203.0.113.${i + 2}`));
+  await new Promise(setImmediate);
+  assert.equal(starts.length, 6);
+  t.mock.timers.tick(59_999);
+  await new Promise(setImmediate);
+  assert.equal(starts.length, 6);
+  t.mock.timers.tick(1);
+  for (const response of remaining) {
+    const stream = events(await response.text());
+    assert.ok(stream.some(e => e.type === 'queue' && e.position > 0));
+    assert.ok(stream.some(e => e.type === 'done'));
+  }
+  assert.equal(starts.length, 12);
+  for (const start of starts) assert.ok(starts.filter(at => at >= start && at < start + 60_000).length * 13_000 <= 90_000);
 });
 
 test('persistent upstream rate errors are safe, friendly and end every variant', async t => {
@@ -423,7 +504,7 @@ test('server-wide slot limit bounds simultaneous x4 upstream calls across client
   let calls = 0;
   let active = 0;
   let peak = 0;
-  const api = setup(t, {}, async (_req, res) => {
+  const api = setup(t, { TOKENS_PER_MIN: '200000' }, async (_req, res) => {
     calls++;
     peak = Math.max(peak, ++active);
     if (calls === 8) eightStarted.resolve();
@@ -575,7 +656,7 @@ test('report write limit is checked before SQLite and shares the normalized abus
   assert.equal((await api.post(`/api/apps/${ids[2]}/report`, {}, '2001:db8:1:3::1')).status, 200);
 });
 
-for (const limit of [{ REQUESTS_PER_MIN: '2' }, { TOKENS_PER_MIN: '14100' }]) {
+for (const limit of [{ REQUESTS_PER_MIN: '2' }, { TOKENS_PER_MIN: '26100' }]) {
   test(`x4 attempts wait in the queue for the shared ${Object.keys(limit)[0]} budget`, async t => {
     t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1000 });
     let calls = 0;

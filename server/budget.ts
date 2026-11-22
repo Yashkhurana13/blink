@@ -1,11 +1,12 @@
 type Attempt = {
-  tokens: number; start: () => void; position?: number; onPosition?: (n: number) => void;
+  tokens: number; start: (charge: Charge) => void; position?: number; onPosition?: (n: number) => void;
 };
+type Charge = { at: number; tokens: number };
 const MINUTE = 60_000;
 
 // A reservation covers one upstream attempt, including attempts that fail or retry.
 export class UpstreamBudget {
-  private charges: { at: number; tokens: number }[] = [];
+  private charges: Charge[] = [];
   private waiting: Attempt[] = [];
   private pausedUntil = 0;
   private timer?: ReturnType<typeof setTimeout>;
@@ -17,7 +18,7 @@ export class UpstreamBudget {
     this.tokensPerMin = options.tokensPerMin ?? 90_000;
   }
 
-  acquire(tokens: number, signal: AbortSignal, onPosition?: (position: number) => void): Promise<void> {
+  acquire(tokens: number, signal: AbortSignal, onPosition?: (position: number) => void): Promise<(actualTokens: number) => void> {
     if (signal.aborted) return Promise.reject(signal.reason);
     return new Promise((resolve, reject) => {
       const abort = () => {
@@ -25,9 +26,13 @@ export class UpstreamBudget {
         reject(signal.reason);
         this.pump();
       };
-      const entry: Attempt = { tokens, onPosition, start: () => {
+      const entry: Attempt = { tokens, onPosition, start: charge => {
         signal.removeEventListener('abort', abort);
-        resolve();
+        resolve(actualTokens => {
+          if (!Number.isSafeInteger(actualTokens) || actualTokens < 0) return;
+          charge.tokens = actualTokens;
+          this.pump();
+        });
       } };
       signal.addEventListener('abort', abort, { once: true });
       this.waiting.push(entry);
@@ -54,10 +59,11 @@ export class UpstreamBudget {
     while (this.waiting.length && now >= this.pausedUntil
       && this.charges.length < this.requestsPerMin && tokens + this.waiting[0].tokens <= this.tokensPerMin) {
       const entry = this.waiting.shift()!;
-      this.charges.push({ at: now, tokens: entry.tokens });
+      const charge = { at: now, tokens: entry.tokens };
+      this.charges.push(charge);
       tokens += entry.tokens;
       if (entry.position !== undefined) entry.onPosition?.(0);
-      entry.start();
+      entry.start(charge);
     }
     this.waiting.forEach((entry, index) => {
       if (entry.position !== index + 1) {

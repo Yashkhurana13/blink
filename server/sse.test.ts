@@ -43,6 +43,28 @@ test('captures usage alongside a delta, including zero tokens', async () => {
   ]))), [{ type: 'delta', text: 'a' }, { type: 'usage', completionTokens: 0 }]);
 });
 
+test('preserves valid prompt and completion usage, including zero, for reconciliation', async () => {
+  const usages = [
+    { prompt_tokens: 3789, completion_tokens: 8000 },
+    { prompt_tokens: 0, completion_tokens: 0 },
+    { prompt_tokens: -1, completion_tokens: 8 },
+    { prompt_tokens: '4000', completion_tokens: 8 },
+    { prompt_tokens: 4000, completion_tokens: -1 },
+    { prompt_tokens: 4000, completion_tokens: '8000' },
+  ];
+  assert.deepEqual(await collect(parseSse(chunks(usages.map(usage => `data: ${JSON.stringify({ usage })}\n\n`)))), [
+    { type: 'usage', promptTokens: 3789, completionTokens: 8000 },
+    { type: 'usage', promptTokens: 0, completionTokens: 0 },
+    { type: 'usage', completionTokens: 8 },
+    { type: 'usage', completionTokens: 8 },
+  ]);
+});
+
+test('strict streaming rejects an abrupt EOF but accepts a split terminal marker', async () => {
+  await assert.rejects(collect(parseSse(chunks(['data: {"choices":[{"delta":{"content":"partial"}}]}\n\n']), true)));
+  assert.deepEqual(await collect(parseSse(chunks(['data: [DO', 'NE]']), true)), []);
+});
+
 test('rejects malformed data and upstream stream errors', async () => {
   await assert.rejects(collect(parseSse(chunks(['data: not-json\n\n']))));
   await assert.rejects(collect(parseSse(chunks(['data: {"error":{"message":"secret"}}\n\n']))));
