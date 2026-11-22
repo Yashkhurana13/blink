@@ -13,7 +13,7 @@ Browser ──► Blink server (/api/generate, SSE) ──► OpenClaw gateway /
 
 - The `blink` OpenClaw agent has no tools and follows [agent/AGENTS.md](agent/AGENTS.md): reply with one self-contained HTML file.
 - The Blink server streams the agent's reply to the browser and measures time to first token, total time, tokens and tok/s.
-- The browser shows the code as it streams, and runs the app in a sandboxed iframe (`sandbox="allow-scripts"`) as soon as `</html>` arrives.
+- The browser shows the code as it streams, and runs the app in a sandboxed iframe as soon as `</html>` arrives. A Content Security Policy blocks all network access from the app; shared apps are served from `/raw/:id` with a CSP `sandbox` header.
 - Remix sends the change plus the current app, in the same OpenClaw conversation.
 - An optional Race mode streams the same prompt to a second OpenAI-compatible provider side by side (see below).
 
