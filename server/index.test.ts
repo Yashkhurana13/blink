@@ -1,11 +1,21 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createServer, type RequestListener, type Server } from 'node:http';
 import test, { type TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { createAppServer } from './index.ts';
+import { createAppServer as createServerApp } from './index.ts';
 import { httpHarness } from './test-http.ts';
+
+function app(t: TestContext, env: NodeJS.ProcessEnv = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'blink-api-'));
+  const server = createServerApp({ ...env, BLINK_DATA_DIR: dir });
+  t.after(() => { server.emit('close'); rmSync(dir, { recursive: true, force: true }); });
+  return server;
+}
 
 function deferred() {
   let resolve!: () => void;
@@ -32,9 +42,11 @@ async function generate(url: string, body: unknown) {
   });
 }
 
-test('the server entry point binds loopback by default for start and dev, and honors HOST', () => {
+test('the server entry point binds loopback by default for start and dev, and honors HOST', t => {
   const entry = fileURLToPath(new URL('./index.ts', import.meta.url));
-  const env = { ...process.env };
+  const dir = mkdtempSync(join(tmpdir(), 'blink-entry-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const env = { ...process.env, BLINK_DATA_DIR: dir };
   delete env.HOST;
   delete env.PORT;
   for (const [overrides, expected] of [
@@ -63,7 +75,7 @@ test('rejects non-JSON API writes with 415 JSON before calling upstream', async 
     upstreamCalls++;
     res.end('data: [DONE]\n\n');
   }));
-  const url = await listen(t, createAppServer({ OPENCLAW_BASE_URL: upstream }));
+  const url = await listen(t, app(t, { OPENCLAW_BASE_URL: upstream }));
   const body = JSON.stringify({ prompt: 'a clock', lane: 'cerebras' });
   for (const contentType of ['text/plain', 'application/jsonp', undefined]) {
     for (const [method, path] of [['POST', '/api/generate'], ['PUT', '/api/config'], ['DELETE', '/api/other'], ['PATCH', '/api']]) {
@@ -85,7 +97,7 @@ test('rejects foreign origins on API writes with 403 JSON before calling upstrea
     upstreamCalls++;
     res.end('data: [DONE]\n\n');
   }));
-  const url = await listen(t, createAppServer({ OPENCLAW_BASE_URL: upstream }));
+  const url = await listen(t, app(t, { OPENCLAW_BASE_URL: upstream }));
   const body = JSON.stringify({ prompt: 'a clock', lane: 'cerebras' });
   for (const origin of ['https://foreign.example', 'null', `${url}.evil.example`, 'http://localhost:51730']) {
     for (const [method, path] of [['POST', '/api/generate'], ['PUT', '/api/config'], ['DELETE', '/api/other'], ['PATCH', '/api']]) {
@@ -107,7 +119,7 @@ test('allows same-origin, both dev origins, configured origins, and no Origin wi
     upstreamCalls++;
     res.end('data: [DONE]\n\n');
   }));
-  const url = await listen(t, createAppServer({
+  const url = await listen(t, app(t, {
     OPENCLAW_BASE_URL: upstream,
     BLINK_ALLOWED_ORIGINS: ' https://one.example, , https://two.example ',
   }));
@@ -119,7 +131,7 @@ test('allows same-origin, both dev origins, configured origins, and no Origin wi
       body: JSON.stringify({ prompt: 'a clock', lane: 'cerebras' }),
     });
     assert.equal(response.status, 200);
-    assert.equal(events(await response.text())[0].type, 'done');
+    assert.equal(events(await response.text()).find(e => e.type === 'done')?.type, 'done');
   }
   assert.equal(upstreamCalls, origins.length);
   const config = await fetch(`${url}/api/config`, { headers: { Origin: 'https://foreign.example' } });
@@ -141,24 +153,29 @@ for (const lane of ['cerebras', 'compare'] as const) {
         res.end('ta: {"choices":[{"delta":{"content":"🌟</html>"}}]}\n\ndata: {"choices":[],"usage":{"completion_tokens":10}}\n\ndata: [DONE]\n\n');
       }, 15);
     }));
-    const url = await listen(t, createAppServer({
+    const url = await listen(t, app(t, {
       OPENCLAW_BASE_URL: upstream,
       OPENCLAW_GATEWAY_TOKEN: 'gateway-secret',
       COMPARE_BASE_URL: `${upstream}/v1/`,
       COMPARE_API_KEY: 'compare-secret', COMPARE_MODEL: 'gpu-model', COMPARE_LABEL: 'GPU',
     }));
     const response = await generate(url, {
-      prompt: 'make it blue', currentHtml: '<html>old</html>', conversationId: 'conversation-123', lane,
+      prompt: 'make it blue', conversationId: 'conversation-123', lane,
     });
     assert.equal(response.status, 200);
     assert.match(response.headers.get('content-type') ?? '', /^text\/event-stream/);
     const stream = events(await response.text());
-    assert.deepEqual(stream.slice(0, 2), [
-      { type: 'delta', text: '<html>' }, { type: 'delta', text: '🌟</html>' },
+    assert.deepEqual(stream.filter(e => e.type === 'delta'), [
+      { type: 'delta', variant: 0, text: '<html>' }, { type: 'delta', variant: 0, text: '🌟</html>' },
     ]);
-    assert.equal(stream.length, 3);
-    assert.equal(stream[2].type, 'done');
-    const stats = stream[2].stats;
+    assert.equal(stream.length, 6);
+    assert.deepEqual(stream[0], { type: 'queue', position: 0 });
+    assert.deepEqual(stream[1], { type: 'status', variant: 0, phase: 'waiting_model' });
+    assert.deepEqual(stream.at(-1), { type: 'end' });
+    const done = stream.find(e => e.type === 'done');
+    assert.match(done.appId, /^[A-Za-z0-9_-]{10}$/);
+    assert.equal(done.variant, 0);
+    const stats = done.stats;
     assert.deepEqual(Object.keys(stats).sort(), ['ttftMs', 'totalMs', 'outputTokens', 'tokensPerSecond', 'tokensEstimated'].sort());
     assert.equal(stats.outputTokens, 10);
     assert.equal(stats.tokensEstimated, false);
@@ -172,7 +189,7 @@ for (const lane of ['cerebras', 'compare'] as const) {
     assert.equal(received.body.user, 'conversation-123');
     const expectedMessages = [{
       role: 'user',
-      content: 'Here is the current app:\n<html>old</html>\n\nChange it: make it blue. Return the complete updated HTML file.',
+      content: 'make it blue\n\nCreative direction: classic, polished.',
     }];
     if (lane === 'compare') expectedMessages.unshift({
       role: 'system', content: await readFile(new URL('../agent/AGENTS.md', import.meta.url), 'utf8'),
@@ -189,16 +206,18 @@ test('omits unset gateway authorization, assigns a conversation, and estimates t
     received = { headers: req.headers, body: JSON.parse(body) };
     res.end('data: {"choices":[{"delta":{"content":"hello"}}]}\n\ndata: [DONE]\n\n');
   }));
-  const url = await listen(t, createAppServer({ OPENCLAW_BASE_URL: upstream }));
+  const url = await listen(t, app(t, { OPENCLAW_BASE_URL: upstream }));
   const response = await generate(url, { prompt: 'a clock', lane: 'cerebras' });
   const stream = events(await response.text());
   assert.equal(received.headers.authorization, undefined);
   assert.equal(typeof received.body.user, 'string');
   assert.ok(received.body.user.length > 0);
-  assert.deepEqual(received.body.messages, [{ role: 'user', content: 'a clock' }]);
-  assert.equal(stream[1].stats.outputTokens, 2);
-  assert.equal(stream[1].stats.tokensEstimated, true);
-  assert.equal(stream[1].stats.tokensPerSecond, 0);
+  assert.deepEqual(received.body.messages, [{ role: 'user', content: 'a clock\n\nCreative direction: classic, polished.' }]);
+  const done = stream.find(e => e.type === 'done');
+  assert.equal(done.stats.outputTokens, 2);
+  assert.equal(done.stats.tokensEstimated, true);
+  assert.equal(done.stats.tokensPerSecond, 0);
+  assert.equal(done.appId, null);
 });
 
 for (const failure of ['http', 'network', 'stream', 'malformed'] as const) {
@@ -215,17 +234,19 @@ for (const failure of ['http', 'network', 'stream', 'malformed'] as const) {
       }
     };
     const upstream = await listen(t, createServer(handler));
-    const url = await listen(t, createAppServer({ OPENCLAW_BASE_URL: upstream, OPENCLAW_GATEWAY_TOKEN: 'gateway-secret' }));
+    const url = await listen(t, app(t, { OPENCLAW_BASE_URL: upstream, OPENCLAW_GATEWAY_TOKEN: 'gateway-secret' }));
     const response = await generate(url, { prompt: 'a clock', lane: 'cerebras' });
     assert.equal(response.status, 200);
     const text = await response.text();
     assert.doesNotMatch(text, /gateway-secret|compare-secret|provider-internal-error/);
     const stream = events(text);
-    assert.equal(stream.length, 1);
-    assert.equal(stream[0].type, 'error');
-    assert.equal(typeof stream[0].message, 'string');
-    assert.ok(stream[0].message.length > 0 && stream[0].message.length < 100);
-    assert.deepEqual(Object.keys(stream[0]).sort(), ['message', 'type']);
+    assert.equal(stream.filter(e => e.type === 'done').length, 0);
+    assert.deepEqual(stream.at(-1), { type: 'end' });
+    const error = stream.find(e => e.type === 'error');
+    assert.equal(error.variant, 0);
+    assert.equal(typeof error.retryable, 'boolean');
+    assert.equal(typeof error.message, 'string');
+    assert.ok(error.message.length > 0 && error.message.length < 100);
   });
 }
 
@@ -235,13 +256,15 @@ test('rejects invalid JSON, types, lengths, and disabled lanes with 400 JSON bef
     upstreamCalls++;
     res.end('data: [DONE]\n\n');
   }));
-  const url = await listen(t, createAppServer({ OPENCLAW_BASE_URL: upstream }));
+  const url = await listen(t, app(t, { OPENCLAW_BASE_URL: upstream }));
   for (const body of [
     null, [], 'prompt', {},
     { prompt: '', lane: 'cerebras' }, { prompt: '  ', lane: 'cerebras' },
-    { prompt: 1, lane: 'cerebras' }, { prompt: 'x'.repeat(4001), lane: 'cerebras' },
-    { prompt: 'a', lane: 'unknown' }, { prompt: 'a' }, { prompt: 'a', lane: 'compare' },
+    { prompt: 1, lane: 'cerebras' }, { prompt: 'x'.repeat(501), lane: 'cerebras' },
+    { prompt: 'a', lane: 'unknown' }, { prompt: 'a', lane: 'compare' },
+    { prompt: 'a', variants: 2 }, { prompt: 'a', remixOf: 1 },
     { prompt: 'a', lane: 'cerebras', currentHtml: 1 },
+    { prompt: 'a', currentHtml: '<html>untrusted</html>' },
     { prompt: 'a', lane: 'cerebras', currentHtml: 'x'.repeat(200001) },
     { prompt: 'a', lane: 'cerebras', conversationId: 42 },
   ]) {
@@ -257,9 +280,9 @@ test('rejects invalid JSON, types, lengths, and disabled lanes with 400 JSON bef
   assert.equal(oversized.status, 400);
   assert.equal(typeof (await oversized.json()).error, 'string');
   assert.equal(upstreamCalls, 0);
-  const valid = await generate(url, { prompt: 'x'.repeat(4000), currentHtml: 'x'.repeat(200000), lane: 'cerebras' });
+  const valid = await generate(url, { prompt: 'x'.repeat(500) });
   assert.equal(valid.status, 200);
-  assert.equal(events(await valid.text())[0].type, 'done');
+  assert.equal(events(await valid.text()).find(e => e.type === 'done')?.type, 'done');
   assert.equal(upstreamCalls, 1);
 });
 
@@ -267,11 +290,11 @@ test('/api/config enables comparison only when all four compare variables are pr
   const complete = {
     COMPARE_BASE_URL: 'http://provider/v1', COMPARE_API_KEY: 'secret', COMPARE_MODEL: 'model', COMPARE_LABEL: 'GPU',
   };
-  const enabled = await listen(t, createAppServer(complete));
-  assert.deepEqual(await (await fetch(`${enabled}/api/config`)).json(), { compareEnabled: true, compareLabel: 'GPU' });
+  const enabled = await listen(t, app(t, complete));
+  assert.deepEqual(await (await fetch(`${enabled}/api/config`)).json(), { compareEnabled: true, compareLabel: 'GPU', variantsEnabled: true, maxPromptChars: 500, publicOrigin: null });
   for (const env of [{}, ...Object.keys(complete).map(key => ({ ...complete, [key]: '' }))]) {
-    const url = await listen(t, createAppServer(env));
-    assert.deepEqual(await (await fetch(`${url}/api/config`)).json(), { compareEnabled: false, compareLabel: null });
+    const url = await listen(t, app(t, env));
+    assert.deepEqual(await (await fetch(`${url}/api/config`)).json(), { compareEnabled: false, compareLabel: null, variantsEnabled: true, maxPromptChars: 500, publicOrigin: null });
   }
 });
 
@@ -282,7 +305,7 @@ test('disconnecting a streaming client aborts the upstream response', { timeout:
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     res.write('data: {"choices":[{"delta":{"content":"hello"}}]}\n\n');
   }));
-  const url = await listen(t, createAppServer({ OPENCLAW_BASE_URL: upstream }));
+  const url = await listen(t, app(t, { OPENCLAW_BASE_URL: upstream }));
   const controller = new AbortController();
   const response = await fetch(`${url}/api/generate`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: 'a clock', lane: 'cerebras' }), signal: controller.signal,
@@ -300,7 +323,7 @@ test('disconnecting before upstream headers aborts the pending upstream request'
     res.on('close', () => closed.resolve());
     started.resolve();
   }));
-  const url = await listen(t, createAppServer({ OPENCLAW_BASE_URL: upstream }));
+  const url = await listen(t, app(t, { OPENCLAW_BASE_URL: upstream }));
   const controller = new AbortController();
   const response = await fetch(`${url}/api/generate`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: 'a clock', lane: 'cerebras' }), signal: controller.signal,
@@ -312,11 +335,11 @@ test('disconnecting before upstream headers aborts the pending upstream request'
   await closed.promise;
 });
 
-test('the three-minute timeout aborts a stalled upstream and sends an error event', { timeout: 5000 }, async t => {
+test('the six-minute timeout aborts a stalled upstream and sends an error event', { timeout: 5000 }, async t => {
   let expire: (() => void) | undefined;
   const realSetTimeout = globalThis.setTimeout;
   t.mock.method(globalThis, 'setTimeout', (callback: () => void, delay: number, ...args: unknown[]) => {
-    if (delay === 180_000) expire = callback;
+    if (delay === 360_000) expire = callback;
     return realSetTimeout(callback, delay, ...args);
   });
   const started = deferred();
@@ -325,11 +348,13 @@ test('the three-minute timeout aborts a stalled upstream and sends an error even
     res.on('close', () => closed.resolve());
     started.resolve();
   }));
-  const url = await listen(t, createAppServer({ OPENCLAW_BASE_URL: upstream }));
+  const url = await listen(t, app(t, { OPENCLAW_BASE_URL: upstream }));
   const response = await generate(url, { prompt: 'a clock', lane: 'cerebras' });
   await started.promise;
-  assert.ok(expire, 'a timeout must be scheduled for 180000ms');
+  assert.ok(expire, 'a timeout must be scheduled for 360000ms');
   expire();
-  assert.deepEqual(events(await response.text()), [{ type: 'error', message: 'Generation timed out.' }]);
+  const stream = events(await response.text());
+  assert.deepEqual(stream.find(e => e.type === 'error'), { type: 'error', variant: 0, retryable: true, message: 'Generation timed out.' });
+  assert.deepEqual(stream.at(-1), { type: 'end' });
   await closed.promise;
 });
