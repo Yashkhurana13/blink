@@ -30,7 +30,7 @@ The code streams in at Cerebras speed, the app runs the instant it's done, and y
 Built on OpenClaw with Kimi K3.1 Pro on @Cerebras. @Kimi_Moonshot #KimiOnCerebras
 
 Team: <your X handle>
-Code: <GitHub link>
+Code: https://github.com/Yashkhurana13/blink
 ```
 
 ## Reddit (r/cerebras, flair "Kimi K3.1 Pro Hackathon")
@@ -42,9 +42,9 @@ I built Blink for the hackathon. You type an idea ("neon snake with a rainbow tr
 
 How it works: a small Node server streams from the OpenClaw gateway's OpenAI-compatible endpoint to the browser, and the app runs in a sandboxed iframe. The agent has no tools, just one instruction file.
 
-Demo video attached. Code: <GitHub link>. Happy to answer questions.
+Demo video attached. Code: https://github.com/Yashkhurana13/blink. Happy to answer questions.
 ```
 
-## GitHub (recommended)
+## GitHub
 
-The repo is local only (`~/Hackathon/blink`, branch `main`). To publish it, create a public repo and push. Claude didn't do this because publishing is your call. Check that `.env` isn't included (it's in `.gitignore`).
+Public repo: https://github.com/Yashkhurana13/blink (branch `main`). `.env` is gitignored and was never committed.
