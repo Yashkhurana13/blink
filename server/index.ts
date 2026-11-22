@@ -1,124 +1,48 @@
-import { randomUUID } from 'node:crypto';
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createHash, timingSafeEqual } from 'node:crypto';
+import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
-import { Readable } from 'node:stream';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { buildLaneRequest, getConfig, type GenerateRequest } from './lanes.ts';
-import { parseSse } from './sse.ts';
-import { createStatsTracker } from './stats.ts';
+import { createClientIdentity } from './client.ts';
+import { AppDatabase, appMetadata } from './db.ts';
+import { canRead, generate, json } from './generate.ts';
+import { getConfig, getPublicOrigin } from './lanes.ts';
+import { positiveInteger, Scheduler } from './queue.ts';
+import { RAW_CSP, sharePage } from './share.ts';
 
 const webRoot = fileURLToPath(new URL('../dist/web/', import.meta.url));
 const contentTypes: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.ico': 'image/x-icon',
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon',
 };
 
-function json(res: ServerResponse, status: number, body: unknown) {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(body));
-}
-
-function validInput(body: unknown): body is GenerateRequest {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
-  const input = body as Record<string, unknown>;
-  return typeof input.prompt === 'string' && input.prompt.trim().length > 0 && input.prompt.length <= 4000
-    && (input.lane === 'cerebras' || input.lane === 'compare')
-    && (input.currentHtml === undefined || (typeof input.currentHtml === 'string' && input.currentHtml.length <= 200000))
-    && (input.conversationId === undefined || typeof input.conversationId === 'string');
-}
-
-async function readBody(req: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  // Keep the response writable when rejecting an oversized request.
-  for await (const chunk of req.iterator({ destroyOnReturn: false })) {
-    bytes += chunk.length;
-    if (bytes > 2_000_000) {
-      req.resume();
-      throw new Error('Request too large');
-    }
-    chunks.push(chunk);
-  }
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
-}
-
-async function generate(req: IncomingMessage, res: ServerResponse, env: NodeJS.ProcessEnv) {
-  const tracker = createStatsTracker();
-  let input: unknown;
-  try {
-    input = await readBody(req);
-  } catch {
-    if (!res.destroyed) json(res, 400, { error: 'Invalid request body' });
-    return;
-  }
-  if (!validInput(input) || (input.lane === 'compare' && !getConfig(env).compareEnabled)) {
-    json(res, 400, { error: 'Invalid prompt, lane, currentHtml, or conversationId' });
-    return;
-  }
-  if (res.destroyed) return;
-
-  const controller = new AbortController();
-  const disconnect = () => controller.abort();
-  res.on('close', disconnect);
-  let timedOut = false;
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, 180_000);
-  timeout.unref();
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream; charset=utf-8',
-    'Cache-Control': 'no-cache',
-    Connection: 'keep-alive',
-  });
-  res.flushHeaders();
-  const send = (event: unknown) => {
-    if (!res.destroyed) res.write(`data: ${JSON.stringify(event)}\n\n`);
-  };
-  try {
-    const upstream = await buildLaneRequest({ ...input, conversationId: input.conversationId ?? randomUUID() }, env);
-    const response = await fetch(upstream.url, {
-      method: 'POST', headers: upstream.headers, body: upstream.body, signal: controller.signal,
-    });
-    if (!response.ok || !response.body) throw new Error('Upstream request failed');
-    for await (const event of parseSse(Readable.fromWeb(response.body))) {
-      if (event.type === 'delta') {
-        tracker.recordDelta(event.text);
-        send(event);
-      } else {
-        tracker.setUsage(event.completionTokens);
-      }
-    }
-    send({ type: 'done', stats: tracker.finish() });
-  } catch {
-    send({ type: 'error', message: timedOut ? 'Generation timed out.' : 'Upstream request failed.' });
-  } finally {
-    clearTimeout(timeout);
-    res.off('close', disconnect);
-    controller.abort();
-    res.end();
-  }
+function adminAuthorized(authorization: string | undefined, token: string) {
+  // Hash both values to a fixed length so even different-length tokens use timingSafeEqual.
+  const hash = (value: string) => createHash('sha256').update(value).digest();
+  return timingSafeEqual(hash(authorization ?? ''), hash(`Bearer ${token}`));
 }
 
 export function createAppServer(env: NodeJS.ProcessEnv = process.env) {
-  return createServer(async (req, res) => {
+  const db = new AppDatabase(env);
+  const identify = createClientIdentity(env);
+  const scheduler = new Scheduler({
+    maxConcurrent: positiveInteger(env.MAX_CONCURRENT, 8),
+    maxQueue: positiveInteger(env.MAX_QUEUE, 40, 0),
+    hourlyLimit: positiveInteger(env.HOURLY_LIMIT, 30),
+  });
+  const server = createServer(async (req, res) => {
     try {
-      const pathname = decodeURIComponent(new URL(req.url ?? '/', 'http://localhost').pathname);
+      const url = new URL(req.url ?? '/', 'http://localhost');
+      const pathname = decodeURIComponent(url.pathname);
       if ((pathname === '/api' || pathname.startsWith('/api/')) && req.method !== 'GET') {
         if (req.headers['content-type']?.split(';', 1)[0].trim().toLowerCase() !== 'application/json') {
           json(res, 415, { error: 'Content-Type must be application/json' });
           return;
         }
         const allowedOrigins = [
-          `http://${req.headers.host}`,
-          'http://127.0.0.1:5173',
-          'http://localhost:5173',
+          `http://${req.headers.host}`, 'http://127.0.0.1:5173', 'http://localhost:5173',
+          getPublicOrigin(env),
           ...(env.BLINK_ALLOWED_ORIGINS ?? '').split(',').map(origin => origin.trim()).filter(Boolean),
         ];
         if (req.headers.origin !== undefined && !allowedOrigins.includes(req.headers.origin)) {
@@ -131,27 +55,88 @@ export function createAppServer(env: NodeJS.ProcessEnv = process.env) {
         return;
       }
       if (pathname === '/api/generate' && req.method === 'POST') {
-        await generate(req, res, env);
+        await generate(req, res, env, db, scheduler, identify(req));
+        return;
+      }
+      if (pathname === '/api/gallery' && req.method === 'GET') {
+        const limit = Number(url.searchParams.get('limit') ?? 24);
+        const cursor = url.searchParams.get('cursor') ?? undefined;
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100
+          || (cursor !== undefined && (!/^\d+$/.test(cursor) || !Number.isSafeInteger(Number(cursor))))) {
+          json(res, 400, { error: 'Invalid gallery cursor or limit' });
+          return;
+        }
+        json(res, 200, db.gallery(cursor, limit));
+        return;
+      }
+      const admin = pathname.match(/^\/api\/admin\/apps\/([A-Za-z0-9_-]{10})\/hide$/);
+      if (admin && req.method === 'POST') {
+        if (!env.ADMIN_TOKEN) json(res, 404, { error: 'Not found' });
+        else if (!adminAuthorized(req.headers.authorization, env.ADMIN_TOKEN)) json(res, 401, { error: 'Unauthorized' });
+        else if (!db.hide(admin[1])) json(res, 404, { error: 'Not found' });
+        else json(res, 200, { ok: true });
+        return;
+      }
+      const appRoute = pathname.match(/^\/api\/apps\/([A-Za-z0-9_-]{10})(?:\/(share|report))?$/);
+      if (appRoute) {
+        const app = db.get(appRoute[1]);
+        const ipHash = identify(req);
+        if (!app) json(res, 404, { error: 'Not found' });
+        else if (!appRoute[2] && req.method === 'GET') {
+          if (canRead(app, ipHash)) json(res, 200, appMetadata(app));
+          else json(res, 404, { error: 'Not found' });
+        } else if (appRoute[2] === 'share' && req.method === 'POST') {
+          if (db.share(app.id, ipHash)) json(res, 200, { url: `/a/${app.id}` });
+          else json(res, 403, { error: 'Only the creator can share this app' });
+        } else if (appRoute[2] === 'report' && req.method === 'POST' && app.shared) {
+          db.report(app.id, ipHash);
+          json(res, 200, { ok: true });
+        } else json(res, 404, { error: 'Not found' });
         return;
       }
       if (pathname === '/api' || pathname.startsWith('/api/')) {
         json(res, 404, { error: 'Not found' });
         return;
       }
-
-      const file = resolve(webRoot, `.${pathname === '/' ? '/index.html' : pathname}`);
+      const pageRoute = pathname.match(/^\/(a|raw)\/([A-Za-z0-9_-]{10})$/);
+      if (pageRoute && req.method === 'GET') {
+        const app = db.get(pageRoute[2]);
+        if (!app || (pageRoute[1] === 'a' ? !app.shared || app.hidden : !canRead(app, identify(req)))) {
+          res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' }).end('<!doctype html><title>Not found · Blink</title><h1>App not found</h1><a href="/">Make your own</a>');
+        } else if (pageRoute[1] === 'raw') {
+          res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': RAW_CSP,
+            'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store',
+          });
+          res.end(app.html);
+        } else {
+          const origin = getPublicOrigin(env) ?? `http://${req.headers.host ?? 'localhost'}`;
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+          res.end(sharePage(app, origin));
+        }
+        return;
+      }
+      if (pathname === '/og.png' && req.method === 'GET') {
+        const body = await readFile(new URL('./assets/og.png', import.meta.url));
+        res.writeHead(200, { 'Content-Type': 'image/png' });
+        res.end(body);
+        return;
+      }
+      const file = resolve(webRoot, `.${['/', '/gallery', '/gallery/'].includes(pathname) ? '/index.html' : pathname}`);
       if (!file.startsWith(resolve(webRoot) + sep)) {
         res.writeHead(404).end('Not found');
         return;
       }
-
       const body = await readFile(file);
       res.writeHead(200, { 'Content-Type': contentTypes[extname(file)] ?? 'application/octet-stream' });
       res.end(body);
     } catch {
-      res.writeHead(404).end('Not found');
+      if (!res.headersSent) res.writeHead(404).end('Not found');
+      else res.end();
     }
   });
+  server.once('close', () => db.close());
+  return server;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

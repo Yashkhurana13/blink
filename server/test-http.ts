@@ -24,6 +24,7 @@ export function httpHarness(t: TestContext) {
     for (const socket of [client, peer]) Object.assign(socket, {
       setTimeout: () => socket, setNoDelay: () => socket, setKeepAlive: () => socket,
     });
+    Object.assign(peer, { remoteAddress: '127.0.0.1' });
     sockets.push(client, peer);
     const agent = new Agent();
     agents.push(agent);
