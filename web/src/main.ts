@@ -1,6 +1,7 @@
 import { generate, getConfig, type Lane, type Stats } from './api.ts';
 import { extractHtml } from './extract.ts';
 import { syncRaceLanes } from './lanes.ts';
+import { buildPreviewDoc } from './preview.ts';
 import './style.css';
 
 const examples = [
@@ -89,6 +90,7 @@ function createLane(id: Lane, label: string) {
   const lane = {
     id, root, conversationId, html: '', text: '', error: '',
     streaming: false, previewSet: false, started: 0, firstDelta: null as number | null,
+    previewToken: '', previewTimer: null as number | null,
     stats: null as Stats | null,
     code: element<HTMLElement>('code', root), pre: element<HTMLPreElement>('pre', root),
     iframe: element<HTMLIFrameElement>('iframe', root),
@@ -165,13 +167,43 @@ function renderLane(lane: LaneState) {
   renderStats(lane);
 }
 
+function resetPreviewWatch(lane: LaneState) {
+  lane.previewToken = '';
+  if (lane.previewTimer !== null) window.clearTimeout(lane.previewTimer);
+  lane.previewTimer = null;
+}
+
 function setPreview(lane: LaneState, html: string) {
+  resetPreviewWatch(lane);
+  const token = crypto.randomUUID();
+  lane.previewToken = token;
   lane.html = html;
   lane.previewSet = true;
-  lane.iframe.srcdoc = html;
+  lane.iframe.srcdoc = buildPreviewDoc(html, token);
   lane.iframe.hidden = false;
   element<HTMLElement>('.preview-empty', lane.root).hidden = true;
+  lane.previewTimer = window.setTimeout(() => {
+    lane.previewTimer = null;
+    if (lane.previewToken !== token || lane.error) return;
+    lane.error = 'The app didn\'t render. Try Remix: "fix the blank screen"';
+    renderLane(lane);
+  }, 6000);
 }
+
+window.addEventListener('message', event => {
+  const data = event.data;
+  if (!data || typeof data !== 'object') return;
+  const lane = lanes.find(lane => lane.previewToken && data.blinkPreview === lane.previewToken
+    && event.source === lane.iframe.contentWindow);
+  if (!lane) return;
+  if (data.type === 'ready') {
+    if (lane.previewTimer !== null) window.clearTimeout(lane.previewTimer);
+    lane.previewTimer = null;
+  } else if (data.type === 'error' && typeof data.message === 'string') {
+    lane.error = `The app hit an error: ${data.message}`;
+    renderLane(lane);
+  }
+});
 
 function syncRaceContexts(refreshCompare = false) {
   const contexts = syncRaceLanes(cerebras, compare, crypto.randomUUID(), refreshCompare);
@@ -206,6 +238,7 @@ form.addEventListener('submit', async event => {
   const started = performance.now();
   const selected = activeLanes();
   for (const lane of selected) {
+    resetPreviewWatch(lane);
     lane.text = '';
     lane.error = '';
     lane.stats = null;
@@ -269,6 +302,7 @@ newButton.addEventListener('click', () => {
   controller?.abort();
   controller = null;
   for (const lane of lanes) {
+    resetPreviewWatch(lane);
     lane.conversationId = crypto.randomUUID();
     lane.html = lane.text = lane.error = '';
     lane.streaming = lane.previewSet = false;

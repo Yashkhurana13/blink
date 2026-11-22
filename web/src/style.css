@@ -79,7 +79,7 @@ h3 { margin: 0; font-size: 13px; font-weight: 650; overflow-wrap: anywhere; }
 pre { height: 340px; margin: 0; padding: 22px; overflow: auto; background: #0d111b; color: #b7caff; scrollbar-color: #384867 #0d111b; font: 12px/1.7 ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace; tab-size: 2; white-space: pre-wrap; overflow-wrap: anywhere; }
 .is-streaming code::after { content: ''; display: inline-block; width: 7px; height: 14px; vertical-align: -2px; margin-left: 3px; background: #8cabff; animation: blink 850ms step-end infinite; }
 .preview-body { height: 340px; position: relative; background: #0b101a; }
-iframe { width: 100%; height: 100%; border: 0; display: block; background: #fff; }
+iframe { width: 100%; height: 100%; border: 0; display: block; background: #0b101a; }
 .preview-empty { height: 100%; padding: 24px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; gap: 9px; color: #8e9cb9; font-size: 12px; background-image: radial-gradient(#33405b70 1px, transparent 1px); background-size: 22px 22px; }
 .empty-mark { color: var(--accent); font-size: 66px; font-weight: 800; line-height: 1; margin-bottom: 12px; }
 .preview-empty strong { color: #d7e1f8; font-size: 17px; font-weight: 550; }
