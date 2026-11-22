@@ -26,6 +26,7 @@ export type GenerateEvent =
   | { type: 'end' };
 
 export interface Config {
+  modelLabel: string;
   compareEnabled: boolean;
   compareLabel: string | null;
   variantsEnabled: boolean;
@@ -136,7 +137,7 @@ export async function getConfig(): Promise<Config> {
   const response = await fetch('/api/config');
   await checkResponse(response);
   const config = await response.json();
-  if (!config || typeof config.compareEnabled !== 'boolean' ||
+  if (!config || typeof config.modelLabel !== 'string' || typeof config.compareEnabled !== 'boolean' ||
       !(config.compareLabel === null || typeof config.compareLabel === 'string') ||
       typeof config.variantsEnabled !== 'boolean' || !Number.isInteger(config.maxPromptChars) || config.maxPromptChars < 1 ||
       !(config.publicOrigin === null || typeof config.publicOrigin === 'string')) {

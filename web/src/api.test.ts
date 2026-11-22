@@ -82,20 +82,28 @@ test('propagates cancellation and stream read failures', async (t) => {
 test('loads configuration and reports HTTP failure', async (t) => {
   t.mock.method(globalThis, 'fetch', async (url: string) => {
     assert.equal(url, '/api/config');
-    return Response.json({ compareEnabled: true, compareLabel: 'GPU provider', variantsEnabled: true, maxPromptChars: 500, publicOrigin: null });
+    return Response.json({ modelLabel: 'Kimi K3.1 Pro on Cerebras', compareEnabled: true, compareLabel: 'GPU provider', variantsEnabled: true, maxPromptChars: 500, publicOrigin: null });
   });
-  assert.deepEqual(await getConfig(), { compareEnabled: true, compareLabel: 'GPU provider', variantsEnabled: true, maxPromptChars: 500, publicOrigin: null });
+  assert.deepEqual(await getConfig(), { modelLabel: 'Kimi K3.1 Pro on Cerebras', compareEnabled: true, compareLabel: 'GPU provider', variantsEnabled: true, maxPromptChars: 500, publicOrigin: null });
   t.mock.restoreAll();
   t.mock.method(globalThis, 'fetch', async () => new Response(null, { status: 500 }));
   await assert.rejects(getConfig(), /500/);
 });
 
 test('supports disabled comparison and rejects malformed configuration', async (t) => {
-  t.mock.method(globalThis, 'fetch', async () => Response.json({ compareEnabled: false, compareLabel: null, variantsEnabled: true, maxPromptChars: 500, publicOrigin: null }));
-  assert.deepEqual(await getConfig(), { compareEnabled: false, compareLabel: null, variantsEnabled: true, maxPromptChars: 500, publicOrigin: null });
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ modelLabel: 'Kimi K3.1 Pro on Cerebras', compareEnabled: false, compareLabel: null, variantsEnabled: true, maxPromptChars: 500, publicOrigin: null }));
+  assert.deepEqual(await getConfig(), { modelLabel: 'Kimi K3.1 Pro on Cerebras', compareEnabled: false, compareLabel: null, variantsEnabled: true, maxPromptChars: 500, publicOrigin: null });
   t.mock.restoreAll();
-  t.mock.method(globalThis, 'fetch', async () => Response.json({ compareEnabled: 'true', compareLabel: null, variantsEnabled: true, maxPromptChars: 500, publicOrigin: null }));
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ modelLabel: 'Kimi K3.1 Pro on Cerebras', compareEnabled: 'true', compareLabel: null, variantsEnabled: true, maxPromptChars: 500, publicOrigin: null }));
   await assert.rejects(getConfig(), /Invalid configuration/);
+});
+
+test('rejects missing or invalid model labels in configuration', async t => {
+  for (const modelLabel of [undefined, null, 42]) {
+    t.mock.method(globalThis, 'fetch', async () => Response.json({ modelLabel, compareEnabled: false, compareLabel: null, variantsEnabled: true, maxPromptChars: 500, publicOrigin: null }));
+    await assert.rejects(getConfig(), /Invalid configuration/);
+    t.mock.restoreAll();
+  }
 });
 
 for (const status of [429, 503]) {

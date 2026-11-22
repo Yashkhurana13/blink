@@ -294,11 +294,16 @@ test('/api/config enables comparison only when all four compare variables are pr
     COMPARE_BASE_URL: 'http://provider/v1', COMPARE_API_KEY: 'secret', COMPARE_MODEL: 'model', COMPARE_LABEL: 'GPU',
   };
   const enabled = await listen(t, app(t, complete));
-  assert.deepEqual(await (await fetch(`${enabled}/api/config`)).json(), { compareEnabled: true, compareLabel: 'GPU', variantsEnabled: true, maxPromptChars: 500, publicOrigin: null });
+  assert.deepEqual(await (await fetch(`${enabled}/api/config`)).json(), { modelLabel: 'Kimi K3.1 Pro on Cerebras', compareEnabled: true, compareLabel: 'GPU', variantsEnabled: true, maxPromptChars: 500, publicOrigin: null });
   for (const env of [{}, ...Object.keys(complete).map(key => ({ ...complete, [key]: '' }))]) {
     const url = await listen(t, app(t, env));
-    assert.deepEqual(await (await fetch(`${url}/api/config`)).json(), { compareEnabled: false, compareLabel: null, variantsEnabled: true, maxPromptChars: 500, publicOrigin: null });
+    assert.deepEqual(await (await fetch(`${url}/api/config`)).json(), { modelLabel: 'Kimi K3.1 Pro on Cerebras', compareEnabled: false, compareLabel: null, variantsEnabled: true, maxPromptChars: 500, publicOrigin: null });
   }
+});
+
+test('/api/config exposes the configured model label', async t => {
+  const url = await listen(t, app(t, { MODEL_LABEL: 'Custom model on Custom provider' }));
+  assert.equal((await (await fetch(`${url}/api/config`)).json()).modelLabel, 'Custom model on Custom provider');
 });
 
 test('disconnecting a streaming client aborts the upstream response', { timeout: 5000 }, async t => {

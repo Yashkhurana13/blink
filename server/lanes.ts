@@ -14,6 +14,7 @@ export type GenerateRequest = {
 export function getConfig(env: NodeJS.ProcessEnv = process.env) {
   const compareEnabled = Boolean(env.COMPARE_BASE_URL && env.COMPARE_API_KEY && env.COMPARE_MODEL && env.COMPARE_LABEL);
   return {
+    modelLabel: env.MODEL_LABEL || 'Kimi K3.1 Pro on Cerebras',
     compareEnabled, compareLabel: compareEnabled ? env.COMPARE_LABEL! : null,
     variantsEnabled: true, maxPromptChars: 500, publicOrigin: getPublicOrigin(env),
   };

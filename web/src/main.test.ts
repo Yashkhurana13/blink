@@ -26,6 +26,9 @@ class Element {
   innerHTML = '';
   className = '';
   contentWindow = {};
+  focused = false;
+  rect = { top: 0, bottom: 400 };
+  scrolls: ScrollIntoViewOptions[] = [];
   classList = {
     contains: (name: string) => this.className.split(' ').includes(name),
     toggle: (name: string, force = !this.classList.contains(name)) => {
@@ -64,7 +67,9 @@ class Element {
     next.parent = parent;
     this.parent = null;
   }
-  focus() {}
+  focus() { this.focused = true; }
+  getBoundingClientRect() { return this.rect; }
+  scrollIntoView(options: ScrollIntoViewOptions) { this.scrolls.push(options); }
   select() {}
   requestSubmit() { return this.handlers.get('submit')!({ preventDefault() {} }); }
 }
@@ -92,7 +97,7 @@ function app(hidden = false, overrides: Record<string, unknown> = {}) {
   const timers = new Map<number, () => void>();
   const timerDelays = new Map<number, number>();
   const handlers = new Map<string, (event: any) => void>();
-  const generations: { body: any; onEvent: (event: GenerateEvent) => void; resolve: () => void }[] = [];
+  const generations: { body: any; onEvent: (event: GenerateEvent) => void; signal: AbortSignal; resolve: () => void }[] = [];
   let nextTimer = 0;
   let nextId = 0;
   const context = createContext({
@@ -100,11 +105,13 @@ function app(hidden = false, overrides: Record<string, unknown> = {}) {
     getGallery: async () => ({ items: [], nextCursor: null }),
     document, crypto: { randomUUID: () => `00000000-0000-4000-8000-${String(++nextId).padStart(12, '0')}` }, performance, AbortController,
     requestAnimationFrame: () => 1, clearInterval() {}, extractHtml, syncRaceLanes, buildPreviewDoc,
-    getConfig: async () => ({ compareEnabled: true, variantsEnabled: true, maxPromptChars: 500 }),
-    generate: (body: unknown, onEvent: (event: GenerateEvent) => void) => new Promise<void>(resolve => {
-      generations.push({ body, onEvent, resolve });
+    getConfig: async () => ({ modelLabel: 'Kimi K3.1 Pro on Cerebras', compareEnabled: true, compareLabel: 'GPU', variantsEnabled: true, maxPromptChars: 500, publicOrigin: null }),
+    generate: (body: unknown, onEvent: (event: GenerateEvent) => void, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
+      generations.push({ body, onEvent, signal, resolve });
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
     }),
     window: {
+      innerHeight: 800,
       clearInterval() {},
       matchMedia: () => ({ matches: false }),
       addEventListener: (type: string, handler: (event: any) => void) => handlers.set(type, handler),
@@ -161,6 +168,134 @@ function app(hidden = false, overrides: Record<string, unknown> = {}) {
     },
   };
 }
+
+test('default branding confines model names to the two quiet credits', async () => {
+  const ui = app();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.doesNotMatch(ui.document.querySelector('#app').innerHTML, /Cerebras|Kimi/);
+  assert.equal(ui.cerebras.root.querySelector('h3').textContent, 'Workspace');
+  assert.equal(ui.cerebras.root.querySelector('.powered-by').textContent, 'Powered by Kimi K3.1 Pro on Cerebras');
+  assert.equal(ui.document.querySelector('footer').textContent, 'Blink · Powered by Kimi K3.1 Pro on Cerebras');
+  for (const lane of [ui.cerebras, ui.compare, ...ui.variants]) {
+    assert.doesNotMatch(lane.root.getAttribute('aria-label')!, /Cerebras|Kimi/);
+    assert.doesNotMatch(lane.iframe.title, /Cerebras|Kimi/);
+    assert.doesNotMatch(lane.root.querySelector('.lane-status').textContent, /Cerebras|Kimi/);
+  }
+  const page = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  assert.match(page, /<title>Blink — apps at the speed of thought<\/title>/);
+  assert.doesNotMatch(page, /Cerebras|Kimi/);
+  ui.race(true);
+  assert.equal(ui.cerebras.root.querySelector('h3').textContent, 'Kimi K3.1 Pro on Cerebras');
+  ui.race(false);
+  assert.equal(ui.cerebras.root.querySelector('h3').textContent, 'Workspace');
+});
+
+test('model credits use text safely and race uses the configured model label', async () => {
+  const ui = app(false, { getConfig: async () => ({ modelLabel: '<Custom & Model>', compareEnabled: true, compareLabel: 'GPU', variantsEnabled: true, maxPromptChars: 500 }) });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ui.document.querySelector('footer').textContent, 'Blink · Powered by <Custom & Model>');
+  assert.equal(ui.cerebras.root.querySelector('.powered-by').textContent, 'Powered by <Custom & Model>');
+  ui.race(true);
+  assert.equal(ui.cerebras.root.querySelector('h3').textContent, '<Custom & Model>');
+});
+
+test('a finished frame can be picked during a run, stopping the rest and ignoring late events', async () => {
+  const ui = app();
+  ui.variations(true);
+  const pending = ui.start();
+  const generation = ui.generations[0];
+  generation.onEvent({ type: 'delta', variant: 0, text: '<html>Keep me</html>' });
+  generation.onEvent({ type: 'delta', variant: 1, text: '<html>Partial app</html>' });
+  generation.onEvent({ type: 'done', variant: 0, stats, appId: 'picked' });
+  assert.equal((ui.variants[0].root.querySelector('.use-variant') as any).disabled, false);
+  assert.equal((ui.variants[1].root.querySelector('.use-variant') as any).disabled, true);
+  ui.choose(0);
+  assert.equal(generation.signal.aborted, true);
+  for (const lane of ui.variants.slice(1)) {
+    assert.equal(lane.root.querySelector('.lane-status').textContent, 'Stopped');
+    assert.equal(lane.iframe.hidden, true);
+  }
+  generation.onEvent({ type: 'done', variant: 1, stats, appId: 'too-late' });
+  ui.choose(1);
+  assert.equal(ui.variants[0].root.classList.contains('chosen'), true);
+  assert.equal(ui.variants[1].phase, 'stopped');
+  await pending;
+  ui.completeChoice();
+  assert.equal(ui.cerebras.appId, 'picked');
+  assert.equal(ui.cerebras.html, '<html>Keep me</html>');
+  assert.equal(ui.cerebras.root.querySelector('.remix-prompt').focused, true);
+  assert.equal(ui.document.querySelector('#prompt').value, '');
+});
+
+test('the empty film placeholder gives way to generation and returns on New', async () => {
+  const ui = app();
+  assert.equal(ui.document.querySelector('#lanes').hidden, true);
+  assert.equal(ui.document.querySelector('#empty-film').hidden, false);
+  assert.match(ui.document.querySelector('#app').innerHTML, /Your four versions will develop here\./);
+  const pending = ui.start();
+  assert.equal(ui.document.querySelector('#empty-film').hidden, true);
+  assert.equal(ui.document.querySelector('#lanes').hidden, false);
+  ui.document.querySelector('#new').handlers.get('click')!({});
+  await pending;
+  assert.equal(ui.document.querySelector('#lanes').hidden, true);
+  assert.equal(ui.document.querySelector('#empty-film').hidden, false);
+});
+
+for (const reduced of [false, true]) {
+  test(`generation and choice scroll into view with ${reduced ? 'instant' : 'smooth'} motion`, async () => {
+    const ui = app();
+    ui.run(`window.matchMedia = () => ({ matches: ${reduced} })`);
+    const strip = ui.document.querySelector('#variations-strip');
+    const workspace = ui.document.querySelector('#lanes');
+    strip.rect = workspace.rect = { top: 1000, bottom: 1500 };
+    ui.variations(true);
+    const pending = ui.start();
+    assert.equal(strip.scrolls[0].behavior, reduced ? 'instant' : 'smooth');
+    const generation = ui.generations[0];
+    generation.onEvent({ type: 'delta', variant: 0, text: '<html>App</html>' });
+    generation.onEvent({ type: 'done', variant: 0, stats, appId: 'picked' });
+    ui.choose(0);
+    if (!reduced) ui.completeChoice();
+    await pending;
+    assert.equal(workspace.scrolls[0].behavior, reduced ? 'instant' : 'smooth');
+    assert.equal(ui.cerebras.root.querySelector('.remix-prompt').focused, true);
+  });
+}
+
+test('Blink submits through the prompt form and enables only for a nonempty idle prompt', async () => {
+  const ui = app();
+  const input = ui.document.querySelector('#prompt');
+  const button = ui.document.querySelector('#submit') as any;
+  assert.equal(button.disabled, true);
+  input.value = '   ';
+  input.handlers.get('input')!({});
+  assert.equal(button.disabled, true);
+  input.value = 'Make a clock';
+  input.handlers.get('input')!({});
+  assert.equal(button.disabled, false);
+  assert.match(button.getAttribute('aria-label'), /Blink/);
+  const pending = ui.document.querySelector('#prompt-form').requestSubmit();
+  assert.equal(ui.generations[0].body.prompt, 'Make a clock');
+  assert.equal(button.disabled, true);
+  ui.generations[0].resolve();
+  await pending;
+  assert.equal(button.disabled, false);
+});
+
+test('solo generation scrolls an offscreen workspace and leaves an already visible workspace in place', async () => {
+  const ui = app();
+  const workspace = ui.document.querySelector('#lanes');
+  let pending = ui.start();
+  assert.equal(workspace.scrolls.length, 0);
+  ui.generations[0].resolve();
+  await pending;
+  workspace.rect = { top: 900, bottom: 1400 };
+  pending = ui.start();
+  assert.equal(workspace.scrolls.length, 1);
+  assert.equal(workspace.scrolls[0].behavior, 'smooth');
+  ui.generations[1].resolve();
+  await pending;
+});
 
 test('each preview gets a fresh iframe with the sandbox and current title', () => {
   const ui = app();
@@ -294,7 +429,7 @@ test('four variations fan out into isolated previews and selection becomes the s
   generation.onEvent({ type: 'queue', position: 0 });
   for (const index of [3, 0, 2, 1]) {
     generation.onEvent({ type: 'status', variant: index, phase: 'waiting_model' });
-    assert.match(ui.variants[index].root.querySelector('.lane-status').textContent, /Waiting for Cerebras/);
+    assert.match(ui.variants[index].root.querySelector('.lane-status').textContent, /Waiting for the model/);
     assert.match(ui.variants[index].root.querySelector('.lane-status').textContent, /\d+\u00a0s$/);
     generation.onEvent({ type: 'delta', variant: index, text: `<html><body>Variation ${index}</body></html>` });
     ui.run(`renderLane(variantLanes[${index}])`);
@@ -356,7 +491,7 @@ for (const previewError of ['runtime', 'watchdog']) {
     assert.ok(lane.error);
     assert.equal(lane.root.getAttribute('data-state'), 'preview-error');
     assert.equal(button.hidden, false);
-    assert.equal((button as any).disabled, true);
+    assert.equal((button as any).disabled, false);
     generation.resolve();
     await pending;
     assert.equal(button.hidden, false);

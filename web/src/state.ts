@@ -2,7 +2,7 @@ import type { AppSummary, GalleryPage, GenerateEvent, Stats } from './api.ts';
 
 export interface VariantState {
   text: string;
-  phase: 'idle' | 'queued' | 'waiting_model' | 'streaming' | 'done' | 'error';
+  phase: 'idle' | 'queued' | 'waiting_model' | 'streaming' | 'done' | 'error' | 'stopped';
   waitingAt: number | null;
   stats: Stats | null;
   appId: string | null;
@@ -37,7 +37,8 @@ export function reduceGeneration(state: GenerationState, event: GenerateEvent, n
 
 export function generationStatus(variant: VariantState, position: number, now: number): string {
   if (variant.phase === 'queued') return `You're #${position} in line`;
-  if (variant.phase === 'waiting_model') return `Waiting for Cerebras · ${Math.max(0, Math.floor((now - (variant.waitingAt ?? now)) / 1000))} s`;
+  if (variant.phase === 'waiting_model') return `Waiting for the model · ${Math.max(0, Math.floor((now - (variant.waitingAt ?? now)) / 1000))} s`;
+  if (variant.phase === 'stopped') return 'Stopped';
   if (variant.phase === 'streaming') return 'Streaming';
   if (variant.phase === 'done') return 'Ready to play';
   if (variant.phase === 'error') return 'Needs attention';
@@ -47,7 +48,7 @@ export function generationStatus(variant: VariantState, position: number, now: n
 export function buildShareLinks(origin: string, path: string): { url: string; x: string } {
   if (!/^\/a\/[\w-]+$/.test(path)) throw new Error('Sharing returned an invalid link. Please try again.');
   const url = new URL(path, origin).href;
-  const query = new URLSearchParams({ text: 'I made this with one sentence on Blink ⚡ #KimiOnCerebras', url });
+  const query = new URLSearchParams({ text: 'I made this with one sentence on Blink ⚡', url });
   return { url, x: `https://twitter.com/intent/tweet?${query}` };
 }
 

@@ -12,7 +12,7 @@ test('queue, waiting time, interleaved variants, errors and end reduce independe
   state = reduceGeneration(state, { type: 'queue', position: 0 }, 2000);
   state = reduceGeneration(state, { type: 'status', variant: 2, phase: 'waiting_model' }, 3000);
   state = reduceGeneration(state, { type: 'status', variant: 2, phase: 'waiting_model' }, 4000);
-  assert.equal(generationStatus(state.variants[2], 0, 26000), 'Waiting for Cerebras · 23 s');
+  assert.equal(generationStatus(state.variants[2], 0, 26000), 'Waiting for the model · 23 s');
   state = reduceGeneration(state, { type: 'delta', variant: 2, text: 'third' }, 27000);
   state = reduceGeneration(state, { type: 'delta', variant: 0, text: 'first' }, 27000);
   state = reduceGeneration(state, { type: 'delta', variant: 2, text: ' app' }, 28000);
@@ -36,7 +36,7 @@ test('share links use the current origin and encode the exact X text and app lin
   assert.equal(links.url, 'https://blink.example:5173/a/abc_123-XY');
   const intent = new URL(links.x);
   assert.equal(intent.pathname, '/intent/tweet');
-  assert.equal(intent.searchParams.get('text'), 'I made this with one sentence on Blink ⚡ #KimiOnCerebras');
+  assert.equal(intent.searchParams.get('text'), 'I made this with one sentence on Blink ⚡');
   assert.equal(intent.searchParams.get('url'), links.url);
   for (const path of ['https://evil.test/a/id', '//evil.test/a/id', '/a/id?x=1', '/raw/id']) {
     assert.throws(() => buildShareLinks('https://blink.example', path));

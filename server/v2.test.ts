@@ -215,6 +215,7 @@ test('share pages escape text and include absolute OG/Twitter URLs, isolated ifr
   const app = api.db.save({ title: evil, prompt: '\"><img src=x onerror=alert(1)>&', html: HTML, ipHash: 'hash', creatorHash: 'hash', parentId: null });
   api.db.share(app.id, 'hash');
   const page = await (await api.get(`/a/${app.id}`)).text();
+  assert.doesNotMatch(page, /Cerebras|Kimi/);
   assert.doesNotMatch(page, /<script>alert|<img src=x/);
   assert.match(page, /&lt;\/title&gt;&lt;script&gt;alert\(&quot;x&quot;\)/);
   assert.match(page, /&quot;&gt;&lt;img src=x onerror=alert\(1\)&gt;&amp;/);

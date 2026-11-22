@@ -24,17 +24,21 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
     <div id="builder">
     <section class="intro" aria-labelledby="headline">
       <h1 id="headline">Think it. <em>Blink it.</em></h1>
-      <p class="sub">Describe an app in one sentence. Kimi K3.1 Pro on Cerebras writes working versions side by side. Circle the one you like and keep going.</p>
+      <p class="sub">Describe an app in one sentence. Get four working versions side by side in seconds. Circle the one you like and keep going.</p>
       <form id="prompt-form">
         <label class="sr-only" for="prompt">Describe your app</label>
         <div class="prompt-bar">
           <input id="prompt" name="prompt" type="text" placeholder="What do you want to make?" autocomplete="off" maxlength="500" required>
           <button id="variations" class="variations-control" type="button" aria-pressed="false">×4 variations</button>
-          <button id="submit" class="primary-button" type="submit" disabled>Blink</button>
+          <button id="submit" class="primary-button" type="submit" aria-label="Blink your app" disabled>Blink</button>
         </div>
       </form>
       <div class="examples" aria-label="Example prompts"></div>
     </section>
+    <div id="empty-film" class="empty-film strip">
+      <div class="blank-frames" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+      <p>Your four versions will develop here.</p>
+    </div>
     <div class="workspace-heading">
       <p>From idea to interaction<span class="workspace-detail"> · live workspace</span></p>
       <label id="race-control" class="race-control" hidden><input id="race" type="checkbox"><span>Race mode</span><span class="toggle" aria-hidden="true"></span></label>
@@ -55,7 +59,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
     </section>
   </main>
   <div id="toast" class="toast" role="status" hidden></div>
-  <footer>Blink · Kimi K3.1 Pro on Cerebras, via OpenClaw · #KimiOnCerebras</footer>
+  <footer>Blink</footer>
 `;
 
 function element<T extends HTMLElement>(selector: string, root: ParentNode = document): T {
@@ -81,6 +85,7 @@ let lastRun: { idea: string; mode: 'solo' | 'race' | 'variations'; bodies: Gener
 let toastTimer = 0;
 let retryTimer = 0;
 let variantsEnabled = true;
+let modelLabel = 'Model';
 function toast(message: string, error = false) {
   const root = element('#toast');
   root.textContent = message;
@@ -125,6 +130,7 @@ function createLane(id: string, label: string, host: HTMLElement = lanesElement)
           <div class="stat"><div><span data-stat="ttft">—</span><span class="stat-unit">ms</span></div><span class="stat-label">First token</span></div>
           <p class="measurement">Measured by Blink<span class="estimate">Waiting for your idea</span></p>
         </div>
+        ${id === 'cerebras' ? '<p class="powered-by"></p>' : ''}
         <div class="lane-actions">
           <form class="remix-form"><input class="remix-prompt" aria-label="Describe your remix" placeholder="Change it: add a streak counter…" maxlength="500" required disabled><button class="remix primary-button" type="submit" disabled>Remix</button></form>
           <button class="share quiet-button" type="button" disabled>Share</button>
@@ -178,7 +184,7 @@ function createLane(id: string, label: string, host: HTMLElement = lanesElement)
   return lane;
 }
 
-const cerebras = createLane('cerebras', 'Cerebras · Kimi K3.1 Pro');
+const cerebras = createLane('cerebras', 'Workspace');
 const compare = createLane('compare', 'Comparison');
 compare.root.hidden = true;
 const variantLanes = ['Classic', 'Bold', 'Minimal', 'Retro'].map((label, index) => {
@@ -197,13 +203,18 @@ function activeLanes() {
 }
 
 function updateControls() {
-  const busy = controller !== null || remixLoading;
+  const busy = controller !== null || remixLoading || choiceTimer !== 0;
   const remix = !choosingVariation && activeLanes().some(lane => lane.appId);
   prompt.disabled = busy;
   prompt.placeholder = remix ? 'What would you like to change?' : 'What do you want to make?';
   prompt.setAttribute('aria-label', remix ? 'Describe your remix' : 'Describe your app');
   submit.disabled = busy || !prompt.value.trim();
   submit.textContent = busy ? 'Blinking…' : remix ? 'Remix' : 'Blink';
+  submit.setAttribute('aria-label', remix ? 'Remix your app' : 'Blink your app');
+  const label = race.checked ? modelLabel : 'Workspace';
+  element('h3', cerebras.root).textContent = label;
+  cerebras.root.setAttribute('aria-label', label);
+  cerebras.iframe.title = `${label} app preview`;
   race.disabled = busy;
   variations.disabled = busy || !variantsEnabled;
   newButton.disabled = !busy && !generationLanes.some(lane => lane.text || lane.html || lane.error);
@@ -213,7 +224,7 @@ function updateControls() {
     element<HTMLButtonElement>('.remix', lane.root).disabled = busy || choosingVariation || !lane.appId || lane.phase !== 'done';
     lane.download.disabled = busy || !lane.html || lane.phase !== 'done';
     element<HTMLButtonElement>('.share', lane.root).disabled = busy || !lane.appId || lane.phase !== 'done' || lane.sharing;
-    element<HTMLButtonElement>('.use-variant', lane.root).disabled = busy || !lane.html || lane.phase !== 'done';
+    element<HTMLButtonElement>('.use-variant', lane.root).disabled = choiceTimer !== 0 || !choosingVariation || !lane.html || lane.phase !== 'done';
     const remaining = Math.max(0, Math.ceil((lane.retryAt - Date.now()) / 1000));
     const retry = element<HTMLButtonElement>('.retry', lane.root);
     retry.disabled = busy || remaining > 0;
@@ -253,17 +264,17 @@ function renderLane(lane: LaneState) {
   lane.pre.scrollTop = lane.pre.scrollHeight;
   lane.root.classList.toggle('is-streaming', lane.streaming);
   lane.root.setAttribute('aria-busy', String(lane.streaming));
-  lane.status.textContent = lane.error ? 'Needs attention' : lane.streaming
+  lane.status.textContent = lane.phase === 'stopped' ? 'Stopped' : lane.error ? 'Needs attention' : lane.streaming
     ? generationStatus(lane, lane.position, performance.now()) : lane.html ? 'Ready to play' : 'Ready to Blink';
   if (lane.root.classList.contains('frame')) {
     const hasCompletedHtml = lane.phase === 'done' && !!lane.html;
-    const state = hasCompletedHtml ? (lane.error ? 'preview-error' : 'done') : lane.error || lane.phase === 'done' ? 'error' : lane.phase === 'streaming' ? 'developing' : 'queued';
+    const state = lane.phase === 'stopped' ? 'stopped' : hasCompletedHtml ? (lane.error ? 'preview-error' : 'done') : lane.error || lane.phase === 'done' ? 'error' : lane.phase === 'streaming' ? 'developing' : 'queued';
     lane.root.setAttribute('data-state', state);
     element('.use-variant', lane.root).hidden = !hasCompletedHtml;
     element('.code-rain', lane.root).textContent = lane.text;
     if (state === 'queued' && lane.position === 0) {
       const seconds = Math.max(0, Math.floor((performance.now() - (lane.waitingAt ?? lane.started)) / 1000));
-      lane.status.textContent = `Waiting for Cerebras · ${seconds}\u00a0s`;
+      lane.status.textContent = `Waiting for the model · ${seconds}\u00a0s`;
     }
     const completed = variantLanes.filter(variant => variant.phase === 'done').length;
     const tokens = variantLanes.reduce((sum, variant) => sum + (variant.stats?.outputTokens ?? 0), 0);
@@ -371,7 +382,17 @@ function scheduleRender() {
 }
 
 function chooseVariation(lane: LaneState) {
-  if (choiceTimer || controller || !choosingVariation || !lane.html || lane.phase !== 'done') return;
+  if (choiceTimer || !choosingVariation || !lane.html || lane.phase !== 'done') return;
+  const run = controller;
+  controller = null;
+  run?.abort();
+  for (const variant of variantLanes) {
+    if (variant.phase === 'done' || variant.phase === 'error') continue;
+    variant.streaming = false;
+    variant.phase = 'stopped';
+    clearLanePreview(variant);
+    renderLane(variant);
+  }
   for (const variant of variantLanes) variant.root.classList.toggle('chosen', variant === lane);
   const expand = () => {
     choiceTimer = 0;
@@ -394,12 +415,23 @@ function chooseVariation(lane: LaneState) {
     // Stop unused apps; the selected workspace gets its own fresh sandbox.
     for (const variant of variantLanes) clearLanePreview(variant);
     renderLane(cerebras);
+    prompt.value = '';
     updateControls();
-    prompt.focus();
+    scrollIntoView(lanesElement);
+    element<HTMLInputElement>('.remix-prompt', cerebras.root).focus({ preventScroll: true });
   };
   // Keep the circle visible before expanding into the existing workspace.
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) expand();
-  else choiceTimer = window.setTimeout(expand, 700);
+  else {
+    choiceTimer = window.setTimeout(expand, 700);
+    updateControls();
+  }
+}
+
+function scrollIntoView(target: HTMLElement) {
+  const rect = target.getBoundingClientRect();
+  if (rect.top >= 0 && rect.bottom <= window.innerHeight) return;
+  target.scrollIntoView({ block: 'start', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
 }
 
 async function shareLane(lane: LaneState) {
@@ -435,7 +467,7 @@ async function shareLane(lane: LaneState) {
 form.addEventListener('submit', event => {
   event.preventDefault();
   const idea = prompt.value.trim();
-  if (!idea || idea.length > prompt.maxLength || controller || remixLoading) return;
+  if (!idea || idea.length > prompt.maxLength || controller || remixLoading || choiceTimer) return;
   if (race.checked) syncRaceContexts();
   const mode = race.checked ? 'race' : variationsOn() ? 'variations' : 'solo';
   const sources = mode === 'race' ? [cerebras, compare] : [cerebras];
@@ -448,7 +480,7 @@ form.addEventListener('submit', event => {
 });
 
 async function runGeneration(request: NonNullable<typeof lastRun>) {
-  if (controller || remixLoading) return;
+  if (controller || remixLoading || choiceTimer) return;
   window.clearTimeout(choiceTimer);
   choiceTimer = 0;
   lastRun = request;
@@ -458,7 +490,8 @@ async function runGeneration(request: NonNullable<typeof lastRun>) {
   race.checked = request.mode === 'race';
   setVariations(choosingVariation);
   variationsStrip.hidden = !choosingVariation;
-  lanesElement.hidden = false;
+  lanesElement.hidden = choosingVariation;
+  element('#empty-film').hidden = true;
   for (const lane of variantLanes) lane.root.classList.toggle('chosen', false);
   compare.root.hidden = !race.checked;
   lanesElement.classList.toggle('is-racing', race.checked);
@@ -485,13 +518,15 @@ async function runGeneration(request: NonNullable<typeof lastRun>) {
     renderLane(lane);
   }
   updateControls();
+  scrollIntoView(choosingVariation ? variationsStrip : lanesElement);
   const timer = window.setInterval(() => {
+    if (controller !== run) { window.clearInterval(timer); return; }
     for (const lane of selected) if (lane.streaming) renderLane(lane);
     updateControls();
   }, 250);
   let succeeded = false;
   await Promise.all(request.bodies.map(async (body, index) => {
-    const targets = choosingVariation ? variantLanes : [selected[index]];
+    const targets = request.mode === 'variations' ? variantLanes : [selected[index]];
     let state = createGeneration(targets.length);
     try {
       await generate(runId ? { ...body, runId } : body, event => {
@@ -536,6 +571,7 @@ async function runGeneration(request: NonNullable<typeof lastRun>) {
               }
             }
             renderLane(lane);
+            updateControls();
           }
         });
       }, run.signal);
@@ -572,7 +608,7 @@ async function runGeneration(request: NonNullable<typeof lastRun>) {
     if (selected.every(lane => lane.retryAt <= Date.now())) window.clearInterval(retryTimer);
   }, 1000);
   updateControls();
-  prompt.focus();
+  prompt.focus({ preventScroll: true });
 }
 
 function clearLanePreview(lane: LaneState) {
@@ -597,7 +633,8 @@ newButton.addEventListener('click', () => {
   lastRun = null;
   choosingVariation = false;
   variationsStrip.hidden = true;
-  lanesElement.hidden = false;
+  lanesElement.hidden = true;
+  element('#empty-film').hidden = false;
   element('#load-error').hidden = true;
   history.replaceState(null, '', location.pathname);
   for (const lane of generationLanes) {
@@ -641,7 +678,7 @@ race.addEventListener('change', () => {
     setVariations(false);
     choosingVariation = false;
     variationsStrip.hidden = true;
-    lanesElement.hidden = false;
+    lanesElement.hidden = !generationLanes.some(lane => lane.text || lane.html || lane.error);
     syncRaceContexts();
   }
   compare.root.hidden = !race.checked;
@@ -660,9 +697,15 @@ variations.addEventListener('click', () => {
 });
 
 for (const lane of generationLanes) renderLane(lane);
+lanesElement.hidden = true;
+element('#empty-film').hidden = false;
+updateControls();
 getConfig().then(config => {
+  modelLabel = config.modelLabel;
+  element('.powered-by', cerebras.root).textContent = `Powered by ${modelLabel}`;
+  element('footer').textContent = `Blink · Powered by ${modelLabel}`;
   variantsEnabled = config.variantsEnabled;
-  variations.disabled = !variantsEnabled;
+  updateControls();
   element('.variations-control').hidden = !config.variantsEnabled;
   prompt.maxLength = Math.min(500, config.maxPromptChars);
   for (const lane of generationLanes) element<HTMLInputElement>('.remix-prompt', lane.root).maxLength = prompt.maxLength;
@@ -681,6 +724,8 @@ async function loadRemix(id: string) {
   controller?.abort();
   controller = run;
   remixLoading = true;
+  lanesElement.hidden = false;
+  element('#empty-film').hidden = true;
   element('#load-error').hidden = true;
   cerebras.status.textContent = 'Loading your remix…';
   updateControls();
