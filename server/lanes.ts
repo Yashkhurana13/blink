@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { buildMessages } from './prompt.ts';
+import { positiveInteger } from './queue.ts';
 
 export type GenerateRequest = {
   prompt: string;
@@ -28,13 +29,16 @@ export async function buildLaneRequest(input: GenerateRequest & { currentHtml?: 
   });
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
+  const maxOutputTokens = positiveInteger(env.MAX_OUTPUT_TOKENS, 9000);
   return {
-    estimatedTokens: Math.ceil(messages.reduce((chars, message) => chars + message.content.length, 0) / 4) + 7000,
+    estimatedTokens: positiveInteger(env.PROMPT_OVERHEAD_TOKENS, 4000, 0)
+      + Math.ceil(messages.reduce((chars, message) => chars + message.content.length, 0) / 3) + maxOutputTokens,
     url: `${base.replace(/\/+$/, '')}${compare ? '/chat/completions' : '/v1/chat/completions'}`,
     headers,
     body: JSON.stringify({
       model: compare ? env.COMPARE_MODEL : 'openclaw/blink',
       stream: true,
+      max_tokens: maxOutputTokens,
       user: input.conversationId,
       messages,
     }),

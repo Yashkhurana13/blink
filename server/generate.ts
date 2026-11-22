@@ -6,7 +6,7 @@ import { AppDatabase, type SavedApp } from './db.ts';
 import { extractHtml, extractTitle } from './extract.ts';
 import { buildLaneRequest, getConfig, type GenerateRequest } from './lanes.ts';
 import { Scheduler } from './queue.ts';
-import { parseSse } from './sse.ts';
+import { parseCompletion, parseSse } from './sse.ts';
 import { createStatsTracker } from './stats.ts';
 
 export function json(res: ServerResponse, status: number, body: unknown) {
@@ -117,9 +117,11 @@ export async function generate(
           conversationId: input.variants === 4 ? `${request.conversationId}:v${variant}` : request.conversationId,
         }, env);
         for (let attempt = 0; ; attempt++) {
+          let reconcile: ((actualTokens: number) => void) | undefined;
+          let actualTokens: number | undefined;
           try {
             upstreamController.signal.throwIfAborted();
-            await budget.acquire(upstream.estimatedTokens, upstreamController.signal,
+            reconcile = await budget.acquire(upstream.estimatedTokens, upstreamController.signal,
               position => send({ type: 'queue', position }));
             upstreamController.signal.throwIfAborted();
             // Time spent waiting for shared quota or backoff is not an upstream timeout.
@@ -134,13 +136,18 @@ export async function generate(
               await response.body?.cancel();
               throw new UpstreamError(response.status === 429 || response.status >= 500, [401, 402, 403, 429].includes(response.status));
             }
-            for await (const event of parseSse(Readable.fromWeb(response.body))) {
+            const events = response.headers.get('content-type')?.split(';', 1)[0].trim() === 'application/json'
+              ? parseCompletion(await response.text()) : parseSse(Readable.fromWeb(response.body), true);
+            for await (const event of events) {
               if (event.type === 'delta') {
                 firstToken = true;
                 text += event.text;
                 tracker.recordDelta(event.text);
                 send({ ...event, variant });
-              } else tracker.setUsage(event.completionTokens);
+              } else {
+                tracker.setUsage(event.completionTokens);
+                if (event.promptTokens !== undefined) actualTokens = event.promptTokens + event.completionTokens;
+              }
             }
             break;
           } catch (error) {
@@ -153,6 +160,7 @@ export async function generate(
             throw error;
           } finally {
             clearTimeout(timeout);
+            if (actualTokens !== undefined) reconcile?.(actualTokens);
           }
         }
         if (!controller.signal.aborted) {
@@ -165,9 +173,10 @@ export async function generate(
       } catch (error) {
         if (!controller.signal.aborted) send({
           type: 'error', variant,
-          message: timedOut ? 'Generation timed out.' : error instanceof UpstreamError && error.paused
+          message: firstToken ? 'That app came out too long. Try a simpler idea, or build it up with remixes.'
+            : timedOut ? 'Generation timed out.' : error instanceof UpstreamError && error.paused
             ? 'Blink is paused or busy. Please try again shortly.' : 'Upstream request failed. Please try again.',
-          retryable: timedOut || (error instanceof UpstreamError && error.retryable),
+          retryable: firstToken || timedOut || (error instanceof UpstreamError && error.retryable),
         });
       } finally {
         clearTimeout(timeout);

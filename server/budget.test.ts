@@ -38,6 +38,59 @@ test('token budget is shared by all attempts, even when request capacity remains
   assert.deepEqual(positions, [1, 0]);
 });
 
+test('actual usage replaces a reservation and immediately admits a waiting attempt', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 });
+  const budget = new UpstreamBudget({ tokensPerMin: 25_000 });
+  const reconcile = await budget.acquire(13_000, signal());
+  const positions: number[] = [];
+  const next = budget.acquire(13_000, signal(), n => positions.push(n));
+  assert.deepEqual(positions, [1]);
+  reconcile(11_789);
+  await next;
+  assert.deepEqual(positions, [1, 0]);
+});
+
+test('reported usage above a reservation is charged in full without extending its window', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 });
+  const budget = new UpstreamBudget({ tokensPerMin: 20_000 });
+  const reconcile = await budget.acquire(7000, signal());
+  t.mock.timers.tick(1000);
+  reconcile(13_000);
+  const positions: number[] = [];
+  const next = budget.acquire(8000, signal(), n => positions.push(n));
+  assert.deepEqual(positions, [1]);
+  t.mock.timers.tick(58_999);
+  assert.deepEqual(positions, [1]);
+  t.mock.timers.tick(1);
+  await next;
+  assert.deepEqual(positions, [1, 0]);
+});
+
+test('missing usage retains the full reservation; reconciliation never refunds a request', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 });
+  const budget = new UpstreamBudget({ requestsPerMin: 2, tokensPerMin: 26_000 });
+  await budget.acquire(13_000, signal());
+  const reconcile = await budget.acquire(13_000, signal());
+  const positions: number[] = [];
+  const next = budget.acquire(13_000, signal(), n => positions.push(n));
+  reconcile(12_000);
+  assert.deepEqual(positions, [1]);
+  reconcile(0);
+  assert.deepEqual(positions, [1], 'the request limit still applies after zero reported tokens');
+  t.mock.timers.tick(60_000);
+  await next;
+});
+
+test('usage received after a reservation expires cannot recharge a new rolling window', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 });
+  const budget = new UpstreamBudget({ tokensPerMin: 13_000 });
+  const reconcile = await budget.acquire(13_000, signal());
+  t.mock.timers.tick(60_000);
+  await budget.acquire(6000, signal());
+  reconcile(12_000);
+  await budget.acquire(7000, signal());
+});
+
 test('cancelling an attempt removes it without charging quota and advances the queue', async t => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 });
   const budget = new UpstreamBudget({ requestsPerMin: 1 });

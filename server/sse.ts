@@ -1,8 +1,22 @@
 export type UpstreamEvent =
   | { type: 'delta'; text: string }
-  | { type: 'usage'; completionTokens: number };
+  | { type: 'usage'; completionTokens: number; promptTokens?: number };
 
-export async function* parseSse(chunks: AsyncIterable<Uint8Array>): AsyncGenerator<UpstreamEvent> {
+export function* parseCompletion(data: string): Generator<UpstreamEvent> {
+  const event = JSON.parse(data);
+  const choice = event.choices?.[0];
+  const text = choice?.delta?.content ?? choice?.message?.content;
+  if (typeof text === 'string' && text.length) yield { type: 'delta', text };
+  const tokens = event.usage?.completion_tokens;
+  const promptTokens = event.usage?.prompt_tokens;
+  if (Number.isSafeInteger(tokens) && tokens >= 0) yield {
+    type: 'usage', completionTokens: tokens,
+    ...(Number.isSafeInteger(promptTokens) && promptTokens >= 0 ? { promptTokens } : {}),
+  };
+  if (event.error || choice?.finish_reason === 'length') throw new Error('Upstream stream error');
+}
+
+export async function* parseSse(chunks: AsyncIterable<Uint8Array>, requireDone = false): AsyncGenerator<UpstreamEvent> {
   const decoder = new TextDecoder();
   let buffer = '';
 
@@ -14,12 +28,7 @@ export async function* parseSse(chunks: AsyncIterable<Uint8Array>): AsyncGenerat
       yield 'done';
       return;
     }
-    const event = JSON.parse(data);
-    if (event.error) throw new Error('Upstream stream error');
-    const text = event.choices?.[0]?.delta?.content;
-    if (typeof text === 'string' && text.length) yield { type: 'delta', text };
-    const tokens = event.usage?.completion_tokens;
-    if (Number.isInteger(tokens) && tokens >= 0) yield { type: 'usage', completionTokens: tokens };
+    yield* parseCompletion(data);
   }
 
   for await (const chunk of chunks) {
@@ -39,4 +48,5 @@ export async function* parseSse(chunks: AsyncIterable<Uint8Array>): AsyncGenerat
     if (event === 'done') return;
     yield event;
   }
+  if (requireDone) throw new Error('Upstream stream ended before completion');
 }

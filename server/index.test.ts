@@ -186,6 +186,7 @@ for (const lane of ['cerebras', 'compare'] as const) {
     assert.equal(received.authorization, `Bearer ${lane === 'cerebras' ? 'gateway-secret' : 'compare-secret'}`);
     assert.equal(received.body.model, lane === 'cerebras' ? 'openclaw/blink' : 'gpu-model');
     assert.equal(received.body.stream, true);
+    assert.equal(received.body.max_tokens, 9000);
     assert.equal(received.body.user, 'conversation-123');
     const expectedMessages = [{
       role: 'user',
