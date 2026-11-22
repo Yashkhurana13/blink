@@ -14,7 +14,7 @@ function streamResponse(chunks: Uint8Array[]) {
 }
 
 test('POSTs the request and parses split SSE lines and UTF-8 characters', async (t) => {
-  const body = { prompt: 'A sun', lane: 'cerebras' as const, conversationId: 'app-id', remixOf: 'parent-app' };
+  const body = { prompt: 'A sun', lane: 'cerebras' as const, conversationId: 'app-id', remixOf: 'parent-app', runId: '0123456789abcdef0123456789abcdef' };
   const signal = new AbortController().signal;
   const events: GenerateEvent[] = [];
   const expected: GenerateEvent[] = [{ type: 'queue', position: 3 }, { type: 'queue', position: 0 }, { type: 'status', variant: 0, phase: 'waiting_model' }, { type: 'delta', variant: 0, text: '☀️\n<html>' }, { type: 'done', variant: 0, stats, appId: 'saved-id' }, { type: 'end' }];

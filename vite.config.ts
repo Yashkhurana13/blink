@@ -5,7 +5,12 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
-    proxy: { '/api': 'http://127.0.0.1:5174' },
+    proxy: {
+      '/api': 'http://127.0.0.1:5174',
+      '/raw': 'http://127.0.0.1:5174',
+      '/a': 'http://127.0.0.1:5174',
+      '/og.png': 'http://127.0.0.1:5174',
+    },
   },
   build: {
     outDir: '../dist/web',

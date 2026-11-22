@@ -9,33 +9,37 @@ function previewScript(html: string) {
   return match[1];
 }
 
-test('inserts the bootstrap first in head and preserves all original HTML', () => {
+const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; media-src data: blob:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'">`;
+
+test('puts network isolation first in head, before instrumentation and app scripts', () => {
   const html = '<!doctype html>\n<html lang="en"><head>\n<title>App</title><script>start()</script></head><body>Hello</body></html>';
   const doc = buildPreviewDoc(html, 'preview-token');
-  assert.ok(doc.startsWith('<!doctype html>\n<html lang="en"><head><script>'));
-  assert.equal(doc.replace(/<script>[\s\S]*?<\/script>/, ''), html);
+  assert.ok(doc.startsWith('<!doctype html>\n<html lang="en"><head>' + csp + '<script>'));
+  assert.ok(doc.indexOf(csp) < doc.indexOf('<script>'));
+  assert.equal(doc.replace(csp, '').replace(/<script>[\s\S]*?<\/script>/, ''), html);
 });
 
-test('inserts after html when head is absent, or at the start for a fragment', () => {
+test('creates a head after html or at the start when no head exists', () => {
   for (const [html, prefix] of [
-    ['<!doctype html><html lang="en"><body>Hello</body></html>', '<!doctype html><html lang="en"><script>'],
-    ['<div>Hello</div>', '<script>'],
-    ['', '<script>'],
+    ['<!doctype html><html lang="en"><body>Hello</body></html>', '<!doctype html><html lang="en">'],
+    ['<script>start()</script><div>Hello</div>', ''],
+    ['', ''],
   ]) {
     const doc = buildPreviewDoc(html, 'token');
-    assert.ok(doc.startsWith(prefix));
-    assert.equal(doc.replace(/<script>[\s\S]*?<\/script>/, ''), html);
+    assert.ok(doc.startsWith(prefix + '<head>' + csp + '<script>'));
+    assert.ok(doc.indexOf(csp) < doc.indexOf('<script>'));
+    assert.equal(doc.replace(/<head>[\s\S]*?<\/head>/, ''), html);
   }
 });
 
 test('recognizes uppercase head and html tags', () => {
   for (const [html, prefix] of [
-    ['<HTML><HEAD data-app="yes"><TITLE>App</TITLE></HEAD></HTML>', '<HTML><HEAD data-app="yes"><script>'],
-    ['<HTML lang="en"><BODY>App</BODY></HTML>', '<HTML lang="en"><script>'],
+    ['<HTML><HEAD data-app="yes"><TITLE>App</TITLE></HEAD></HTML>', '<HTML><HEAD data-app="yes">'],
+    ['<HTML lang="en"><BODY>App</BODY></HTML>', '<HTML lang="en"><head>'],
   ]) {
     const doc = buildPreviewDoc(html, 'token');
-    assert.ok(doc.startsWith(prefix));
-    assert.equal(doc.replace(/<script>[\s\S]*?<\/script>/, ''), html);
+    assert.ok(doc.startsWith(prefix + csp + '<script>'));
+    assert.ok(doc.indexOf(csp) < doc.indexOf('<script>'));
   }
 });
 
