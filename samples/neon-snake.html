@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Neon Serpent</title>
+<style>
+  :root{color-scheme:dark;--bg:#050611;--panel:#0b0d1d;--cyan:#55f7ff;--pink:#ff4fd8;--text:#eef6ff;--muted:#8490ad}
+  *{box-sizing:border-box}
+  html,body{margin:0;min-height:100%;background:var(--bg);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--text);overscroll-behavior:none}
+  body{min-height:100svh;display:grid;place-items:center;padding:20px;user-select:none;-webkit-user-select:none;background:radial-gradient(circle at 50% 25%,#151437 0,transparent 48%),#050611}
+  button{font:inherit;color:inherit}
+  .app{width:min(760px,100%);display:grid;gap:14px}
+  header{display:flex;align-items:end;justify-content:space-between;gap:12px}
+  .title{margin:0;font-size:clamp(20px,4vw,30px);letter-spacing:.13em;font-weight:800;text-shadow:0 0 18px #8c5cff88}
+  .title span{color:var(--cyan)}
+  .best{font-size:12px;color:var(--muted);letter-spacing:.1em;text-align:right}
+  .best strong{display:block;color:#ffe56b;font-size:20px;letter-spacing:0;text-shadow:0 0 12px #ffe56b55}
+  .board-shell{position:relative;padding:1px;border-radius:22px;background:linear-gradient(135deg,#57f6ff88,#7558ff44 45%,#ff4fd888);box-shadow:0 0 40px #5d4bdb20,0 18px 60px #0009}
+  .board{position:relative;isolation:isolate;overflow:hidden;border-radius:21px;background:#080a17;touch-action:none}
+  canvas{display:block;width:100%;aspect-ratio:6/5}
+  .hud{position:absolute;inset:14px 16px auto;display:flex;justify-content:space-between;align-items:center;pointer-events:none;z-index:2}
+  .score{font-size:11px;letter-spacing:.14em;color:#99a5c1;text-shadow:0 1px 4px #000}
+  .score b{display:block;font-size:24px;color:white;letter-spacing:0;line-height:1.05}
+  .pause{pointer-events:auto;width:36px;height:32px;border:1px solid #ffffff24;border-radius:10px;background:#090b18a8;cursor:pointer;backdrop-filter:blur(5px)}
+  .pause:hover{border-color:var(--cyan)}
+  .overlay{position:absolute;inset:0;z-index:3;display:grid;place-items:center;padding:24px;text-align:center;background:#060714c9;backdrop-filter:blur(7px);transition:opacity .22s}
+  .overlay.hidden{opacity:0;pointer-events:none}
+  .overlay-card{max-width:420px}
+  .mark{font-size:52px;line-height:1;filter:drop-shadow(0 0 14px #ff4fd877);margin-bottom:14px}
+  .overlay h2{font-size:clamp(22px,5vw,34px);margin:0 0 10px;letter-spacing:.08em}
+  .overlay p{margin:0 auto 20px;color:#aab5ce;line-height:1.55;font-size:13px;max-width:340px}
+  .primary{border:1px solid #74faff88;border-radius:12px;padding:12px 25px;background:linear-gradient(120deg,#123c50,#31245c);box-shadow:0 0 22px #53eeff20;cursor:pointer;font-weight:700;letter-spacing:.1em;transition:transform .15s,box-shadow .15s}
+  .primary:hover,.primary:focus-visible{transform:translateY(-2px);box-shadow:0 0 28px #53eeff55;outline:none}
+  .hint{font-size:11px;color:#697691;margin-top:16px}
+  .controls{display:flex;justify-content:space-between;align-items:center;gap:14px;color:#697691;font-size:11px}
+  .dpad{display:grid;grid-template-columns:repeat(3,45px);grid-template-rows:repeat(2,42px);gap:6px}
+  .key{border:1px solid #ffffff1c;border-radius:10px;background:#0c1020;color:#b8c9e5;cursor:pointer;touch-action:manipulation;font-size:19px;box-shadow:inset 0 1px #ffffff0b}
+  .key:active{background:#18374a;color:var(--cyan);transform:scale(.95)}
+  .key.up{grid-column:2}.key.left{grid-column:1}.key.down{grid-column:2}.key.right{grid-column:3}
+  .desktop-tip{line-height:1.7;text-align:left}
+  kbd{padding:2px 5px;border:1px solid #ffffff1c;border-radius:4px;color:#aab5ce;background:#0d1020}
+  @media(pointer:fine) and (min-width:700px){.dpad{display:none}}
+  @media(max-width:520px){body{padding:12px}.app{gap:10px}.controls{justify-content:center}.desktop-tip{display:none}.board-shell{border-radius:17px}.board{border-radius:16px}.hud{inset:10px 12px auto}.overlay p{font-size:12px}.mark{font-size:42px}}
+  @media(prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<main class="app">
+  <header>
+    <h1 class="title">NEON<span>//</span>SERPENT</h1>
+    <div class="best">BEST<strong id="best">0</strong></div>
+  </header>
+  <section class="board-shell" aria-label="Neon snake game">
+    <div class="board" id="board">
+      <canvas id="game" aria-label="Snake game board"></canvas>
+      <div class="hud">
+        <div class="score">SCORE<b id="score">0</b></div>
+        <button class="pause" id="pause" aria-label="Pause game">Ⅱ</button>
+      </div>
+      <div class="overlay" id="overlay">
+        <div class="overlay-card">
+          <div class="mark" id="mark">◈</div>
+          <h2 id="overlayTitle">CHASE THE GLOW</h2>
+          <p id="overlayText">Guide the serpent. Collect energy cores. Leave a rainbow in your wake—but don’t cross your own path.</p>
+          <button class="primary" id="action">START</button>
+          <div class="hint" id="hint">Arrow keys / WASD · Swipe on mobile</div>
+        </div>
+      </div>
+    </div>
+  </section>
+  <div class="controls">
+    <div class="desktop-tip"><kbd>↑↓←→</kbd> or <kbd>WASD</kbd> to move<br><kbd>Space</kbd> to pause · <kbd>Enter</kbd> to restart</div>
+    <div class="dpad" aria-label="Touch controls">
+      <button class="key up" data-dir="up" aria-label="Move up">↑</button>
+      <button class="key left" data-dir="left" aria-label="Move left">←</button>
+      <button class="key down" data-dir="down" aria-label="Move down">↓</button>
+      <button class="key right" data-dir="right" aria-label="Move right">→</button>
+    </div>
+  </div>
+</main>
+<script>
+(() => {
+  'use strict';
+  const COLS=24, ROWS=20, START_LENGTH=4;
+  const canvas=document.getElementById('game'),ctx=canvas.getContext('2d');
+  const board=document.getElementById('board'),scoreEl=document.getElementById('score'),bestEl=document.getElementById('best');
+  const overlay=document.getElementById('overlay'),titleEl=document.getElementById('overlayTitle'),textEl=document.getElementById('overlayText');
+  const action=document.getElementById('action'),mark=document.getElementById('mark'),pauseBtn=document.getElementById('pause');
+  let best=0;
+  try{best=Number(localStorage.getItem('neonSerpentBest'))||0}catch(e){}
+  bestEl.textContent=best;
+  let snake=[],food,dir={x:1,y:0},queued=[],state='ready',score=0;
+  let trail=[],particles=[],lastTime=0,accumulator=0,stepTime=145,flash=0,pulse=0;
+  const dirs={up:{x:0,y:-1},down:{x:0,y:1},left:{x:-1,y:0},right:{x:1,y:0}};
+
+  function reset(){
+    snake=[];
+    for(let i=0;i<START_LENGTH;i++)snake.push({x:7-i,y:10});
+    dir={x:1,y:0};queued=[];score=0;stepTime=145;trail=[];particles=[];accumulator=0;flash=0;
+    scoreEl.textContent='0';placeFood();
+  }
+  function placeFood(){
+    const empty=[];
+    for(let y=0;y<ROWS;y++)for(let x=0;x<COLS;x++)if(!snake.some(s=>s.x===x&&s.y===y))empty.push({x,y});
+    food=empty[Math.floor(Math.random()*empty.length)];
+  }
+  function start(){
+    reset();state='running';overlay.classList.add('hidden');lastTime=performance.now();pauseBtn.textContent='Ⅱ';pauseBtn.setAttribute('aria-label','Pause game');
+  }
+  function togglePause(){
+    if(state==='running'){
+      state='paused';titleEl.textContent='SIGNAL PAUSED';textEl.textContent='The grid is holding your path. Jump back in when you’re ready.';mark.textContent='Ⅱ';action.textContent='RESUME';
+      overlay.classList.remove('hidden');pauseBtn.textContent='▶';pauseBtn.setAttribute('aria-label','Resume game');
+    }else if(state==='paused'){
+      state='running';overlay.classList.add('hidden');lastTime=performance.now();accumulator=0;pauseBtn.textContent='Ⅱ';pauseBtn.setAttribute('aria-label','Pause game');
+    }else start();
+  }
+  function endGame(){
+    state='over';
+    if(score>best){best=score;bestEl.textContent=best;try{localStorage.setItem('neonSerpentBest',best)}catch(e){}}
+    titleEl.textContent=score===best&&score>0?'NEW HIGH VOLTAGE':'TRAIL TERMINATED';
+    textEl.textContent=`You collected ${score} energy ${score===1?'core':'cores'}. ${score>=best&&score>0?'A new personal best burns bright.':'The grid is ready for another run.'}`;
+    mark.textContent='✦';action.textContent='PLAY AGAIN';overlay.classList.remove('hidden');
+  }
+  function queueDirection(d){
+    if(state==='ready'||state==='over')return;
+    const previous=queued.length?queued[queued.length-1]:dir;
+    if(d.x===-previous.x&&d.y===-previous.y)return;
+    if(d.x===previous.x&&d.y===previous.y)return;
+    if(queued.length<2)queued.push(d);
+  }
+  function update(){
+    if(queued.length)dir=queued.shift();
+    const head={x:snake[0].x+dir.x,y:snake[0].y+dir.y};
+    const eating=food&&head.x===food.x&&head.y===food.y;
+    const bodyLimit=eating?snake.length:snake.length-1;
+    if(head.x<0||head.x>=COLS||head.y<0||head.y>=ROWS||snake.slice(0,bodyLimit).some(s=>s.x===head.x&&s.y===head.y)){
+      burst(snake[0].x,snake[0].y,'#ff4f8b',24);flash=1;endGame();return;
+    }
+    snake.unshift(head);
+    trail.push({x:head.x,y:head.y,life:1,hue:(score*31+snake.length*17)%360});
+    if(trail.length>160)trail.shift();
+    if(eating){
+      score++;scoreEl.textContent=score;stepTime=Math.max(68,145-score*2.7);burst(head.x,head.y,'#ffe96b',18);placeFood();
+    }else snake.pop();
+  }
+  function burst(x,y,color,count){
+    for(let i=0;i<count;i++){
+      const a=Math.random()*Math.PI*2,s=.7+Math.random()*2.5;
+      particles.push({x:x+.5,y:y+.5,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:1,color});
+    }
+  }
+  function resize(){
+    const r=canvas.getBoundingClientRect(),dpr=Math.min(window.devicePixelRatio||1,2);
+    canvas.width=Math.max(1,Math.round(r.width*dpr));canvas.height=Math.max(1,Math.round(r.height*dpr));draw();
+  }
+  function roundedRect(x,y,w,h,r){
+    r=Math.min(r,w/2,h/2);ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();
+  }
+  function draw(){
+    const w=canvas.width,h=canvas.height,cw=w/COLS,ch=h/ROWS;
+    ctx.clearRect(0,0,w,h);
+    const bg=ctx.createRadialGradient(w*.5,h*.42,0,w*.5,h*.42,w*.7);bg.addColorStop(0,flash>0?'#281027':'#10132a');bg.addColorStop(1,'#060812');ctx.fillStyle=bg;ctx.fillRect(0,0,w,h);
+    ctx.lineWidth=Math.max(1,w/900);ctx.strokeStyle='rgba(115,135,190,.065)';ctx.beginPath();
+    for(let x=1;x<COLS;x++){ctx.moveTo(x*cw,0);ctx.lineTo(x*cw,h)}
+    for(let y=1;y<ROWS;y++){ctx.moveTo(0,y*ch);ctx.lineTo(w,y*ch)}ctx.stroke();
+    // Soft stars remain fixed in the grid.
+    for(let i=0;i<22;i++){
+      const x=((i*67)%97)/97*w,y=((i*43)%89)/89*h;
+      ctx.fillStyle=`rgba(150,190,255,${.07+.05*Math.sin(pulse*.001+i)})`;ctx.beginPath();ctx.arc(x,y,Math.max(1,cw*.035),0,Math.PI*2);ctx.fill();
+    }
+    // The fading rainbow wake.
+    ctx.save();ctx.globalCompositeOperation='lighter';
+    for(const t of trail){
+      if(t.life<=0)continue;
+      const x=(t.x+.5)*cw,y=(t.y+.5)*ch,r=Math.min(cw,ch)*(.15+.15*t.life);
+      const g=ctx.createRadialGradient(x,y,0,x,y,r*2.4);g.addColorStop(0,`hsla(${t.hue},100%,65%,${t.life*.19})`);g.addColorStop(1,'transparent');
+      ctx.fillStyle=g;ctx.beginPath();ctx.arc(x,y,r*2.4,0,Math.PI*2);ctx.fill();
+    }
+    ctx.restore();
+    if(food){
+      const x=(food.x+.5)*cw,y=(food.y+.5)*ch,r=Math.min(cw,ch)*(.22+Math.sin(pulse*.007)*.025);
+      ctx.save();ctx.shadowColor='#ffdd55';ctx.shadowBlur=r*2.5;ctx.fillStyle='#fff7ab';ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fill();
+      ctx.strokeStyle=`rgba(255,213,80,${.35+.25*Math.sin(pulse*.005)})`;ctx.lineWidth=Math.max(1,cw*.055);ctx.beginPath();ctx.arc(x,y,r*1.75,0,Math.PI*2);ctx.stroke();ctx.restore();
+    }
+    snake.forEach((s,i)=>{
+      const inset=Math.min(cw,ch)*.12,x=s.x*cw+inset,y=s.y*ch+inset,sizeX=cw-inset*2,sizeY=ch-inset*2;
+      const hue=(score*29+i*18+trail.length*2)%360;
+      ctx.save();ctx.shadowColor=`hsl(${hue},100%,60%)`;ctx.shadowBlur=Math.min(cw,ch)*(i===0?.65:.35);
+      ctx.fillStyle=i===0?'#eaffff':`hsl(${hue},95%,${Math.max(45,67-i*.6)}%)`;roundedRect(x,y,sizeX,sizeY,Math.min(cw,ch)*.28);ctx.fill();
+      if(i===0){
+        ctx.shadowBlur=0;ctx.fillStyle='#08121c';
+        const ex=x+sizeX*(dir.x===0?.30:dir.x>0?.72:.28),ey=y+sizeY*(dir.y===0?.30:dir.y>0?.72:.28);
+        const ex2=x+sizeX*(dir.x===0?.70:dir.x>0?.72:.28),ey2=y+sizeY*(dir.y===0?.70:dir.y>0?.72:.28);
+        ctx.beginPath();ctx.arc(ex,ey,Math.max(1,cw*.055),0,Math.PI*2);ctx.arc(ex2,ey2,Math.max(1,cw*.055),0,Math.PI*2);ctx.fill();
+      }
+      ctx.restore();
+    });
+    for(const p of particles){
+      ctx.globalAlpha=Math.max(0,p.life);ctx.fillStyle=p.color;ctx.beginPath();ctx.arc(p.x*cw,p.y*ch,Math.min(cw,ch)*.09*p.life,0,Math.PI*2);ctx.fill();
+    }
+    ctx.globalAlpha=1;
+  }
+  function frame(time){
+    const dt=Math.min(50,time-(lastTime||time));lastTime=time;pulse=time;
+    if(state==='running'){
+      accumulator+=dt;
+      while(accumulator>=stepTime&&state==='running'){update();accumulator-=stepTime}
+    }
+    for(const t of trail)t.life-=dt/2100;
+    trail=trail.filter(t=>t.life>0);
+    for(const p of particles){p.x+=p.vx*dt/350;p.y+=p.vy*dt/350;p.vx*=.98;p.vy*=.98;p.life-=dt/650}
+    particles=particles.filter(p=>p.life>0);flash=Math.max(0,flash-dt/500);draw();requestAnimationFrame(frame);
+  }
+  action.addEventListener('click',()=>state==='paused'?togglePause():start());
+  pauseBtn.addEventListener('click',togglePause);
+  document.querySelectorAll('[data-dir]').forEach(b=>b.addEventListener('pointerdown',e=>{e.preventDefault();queueDirection(dirs[b.dataset.dir])}));
+  document.addEventListener('keydown',e=>{
+    const k=e.key.toLowerCase(),map={arrowup:'up',w:'up',arrowdown:'down',s:'down',arrowleft:'left',a:'left',arrowright:'right',d:'right'};
+    if(map[k]){e.preventDefault();queueDirection(dirs[map[k]])}
+    else if(k===' '){e.preventDefault();togglePause()}
+    else if(k==='enter'&&(state==='ready'||state==='over')){e.preventDefault();start()}
+  });
+  let touch=null;
+  board.addEventListener('pointerdown',e=>{if(e.target.closest('button'))return;touch={x:e.clientX,y:e.clientY}});
+  board.addEventListener('pointerup',e=>{
+    if(!touch)return;const dx=e.clientX-touch.x,dy=e.clientY-touch.y;touch=null;
+    if(Math.max(Math.abs(dx),Math.abs(dy))<18)return;
+    queueDirection(Math.abs(dx)>Math.abs(dy)?dirs[dx>0?'right':'left']:dirs[dy>0?'down':'up']);
+  });
+  document.addEventListener('visibilitychange',()=>{if(document.hidden&&state==='running')togglePause()});
+  window.addEventListener('resize',resize);
+  reset();resize();requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
