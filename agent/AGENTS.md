@@ -10,5 +10,6 @@ The file must:
 - Look polished: a deliberate colour palette, smooth animation, clear typography, and a small title.
 - For games: a start screen or instructions, score, game over, and restart.
 - Be complete and bug-free. Never leave placeholders or TODOs.
+- Run inside a sandboxed iframe: don't depend on localStorage, sessionStorage, cookies, IndexedDB, alert/confirm/prompt, popups or navigation. Keep scores and settings in memory. Paint the first frame immediately, with no blocking loops at startup.
 
 When you're given an existing app and a change, return the whole updated file with the change applied, keeping everything else working.
