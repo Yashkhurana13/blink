@@ -110,6 +110,22 @@ export function createAppServer(env: NodeJS.ProcessEnv = process.env) {
   return createServer(async (req, res) => {
     try {
       const pathname = decodeURIComponent(new URL(req.url ?? '/', 'http://localhost').pathname);
+      if ((pathname === '/api' || pathname.startsWith('/api/')) && req.method !== 'GET') {
+        if (req.headers['content-type']?.split(';', 1)[0].trim().toLowerCase() !== 'application/json') {
+          json(res, 415, { error: 'Content-Type must be application/json' });
+          return;
+        }
+        const allowedOrigins = [
+          `http://${req.headers.host}`,
+          'http://127.0.0.1:5173',
+          'http://localhost:5173',
+          ...(env.BLINK_ALLOWED_ORIGINS ?? '').split(',').map(origin => origin.trim()).filter(Boolean),
+        ];
+        if (req.headers.origin !== undefined && !allowedOrigins.includes(req.headers.origin)) {
+          json(res, 403, { error: 'Origin not allowed' });
+          return;
+        }
+      }
       if (pathname === '/api/config' && req.method === 'GET') {
         json(res, 200, getConfig(env));
         return;
@@ -139,7 +155,7 @@ export function createAppServer(env: NodeJS.ProcessEnv = process.env) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  createAppServer().listen(Number(process.env.PORT ?? 5173), () => {
+  createAppServer().listen(Number(process.env.PORT ?? 5173), process.env.HOST ?? '127.0.0.1', () => {
     console.log(`Blink listening on port ${process.env.PORT ?? 5173}`);
   });
 }

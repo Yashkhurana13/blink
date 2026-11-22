@@ -1,5 +1,6 @@
 import { generate, getConfig, type Lane, type Stats } from './api.ts';
 import { extractHtml } from './extract.ts';
+import { syncRaceLanes } from './lanes.ts';
 import './style.css';
 
 const examples = [
@@ -84,8 +85,9 @@ function createLane(id: Lane, label: string) {
   `;
   element('h3', root).textContent = label;
   element<HTMLIFrameElement>('iframe', root).title = `${label} app preview`;
+  const conversationId: string = crypto.randomUUID();
   const lane = {
-    id, root, conversationId: crypto.randomUUID(), html: '', text: '', error: '',
+    id, root, conversationId, html: '', text: '', error: '',
     streaming: false, previewSet: false, started: 0, firstDelta: null as number | null,
     stats: null as Stats | null,
     code: element<HTMLElement>('code', root), pre: element<HTMLPreElement>('pre', root),
@@ -171,6 +173,21 @@ function setPreview(lane: LaneState, html: string) {
   element<HTMLElement>('.preview-empty', lane.root).hidden = true;
 }
 
+function syncRaceContexts(refreshCompare = false) {
+  const contexts = syncRaceLanes(cerebras, compare, crypto.randomUUID(), refreshCompare);
+  lanes.forEach((lane, index) => {
+    const context = contexts[index];
+    if (context === lane) return;
+    lane.conversationId = context.conversationId;
+    lane.text = context.html;
+    lane.error = '';
+    lane.stats = lane.firstDelta = null;
+    lane.started = 0;
+    setPreview(lane, context.html);
+    renderLane(lane);
+  });
+}
+
 function scheduleRender() {
   if (frame) return;
   frame = requestAnimationFrame(() => {
@@ -183,6 +200,7 @@ form.addEventListener('submit', async event => {
   event.preventDefault();
   const idea = prompt.value.trim();
   if (!idea || controller) return;
+  if (race.checked) syncRaceContexts();
   const run = new AbortController();
   controller = run;
   const started = performance.now();
@@ -281,6 +299,7 @@ for (const example of examples) {
 
 prompt.addEventListener('input', updateControls);
 race.addEventListener('change', () => {
+  if (race.checked) syncRaceContexts(true);
   compare.root.hidden = !race.checked;
   lanesElement.classList.toggle('is-racing', race.checked);
   updateControls();

@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { createServer, type RequestListener, type Server } from 'node:http';
 import test, { type TestContext } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { createAppServer } from './index.ts';
 import { httpHarness } from './test-http.ts';
 
@@ -29,6 +31,101 @@ async function generate(url: string, body: unknown) {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });
 }
+
+test('the server entry point binds loopback by default for start and dev, and honors HOST', () => {
+  const entry = fileURLToPath(new URL('./index.ts', import.meta.url));
+  const env = { ...process.env };
+  delete env.HOST;
+  delete env.PORT;
+  for (const [overrides, expected] of [
+    [{}, { port: 5173, host: '127.0.0.1' }],
+    [{ PORT: '5174' }, { port: 5174, host: '127.0.0.1' }],
+    [{ HOST: '0.0.0.0' }, { port: 5173, host: '0.0.0.0' }],
+  ] as const) {
+    // Capture the actual entry point's listen arguments without opening sockets.
+    const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
+      import { Server } from 'node:http';
+      process.argv[1] = ${JSON.stringify(entry)};
+      Server.prototype.listen = function (port, host) {
+        console.log(JSON.stringify({ port, host }));
+        return this;
+      };
+      await import(${JSON.stringify(entry)});
+    `], { env: { ...env, ...overrides }, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), expected);
+  }
+});
+
+test('rejects non-JSON API writes with 415 JSON before calling upstream', async t => {
+  let upstreamCalls = 0;
+  const upstream = await listen(t, createServer((_req, res) => {
+    upstreamCalls++;
+    res.end('data: [DONE]\n\n');
+  }));
+  const url = await listen(t, createAppServer({ OPENCLAW_BASE_URL: upstream }));
+  const body = JSON.stringify({ prompt: 'a clock', lane: 'cerebras' });
+  for (const contentType of ['text/plain', 'application/jsonp', undefined]) {
+    for (const [method, path] of [['POST', '/api/generate'], ['PUT', '/api/config'], ['DELETE', '/api/other'], ['PATCH', '/api']]) {
+      const response = await fetch(`${url}${path}`, {
+        method, headers: { 'Content-Length': String(Buffer.byteLength(body)), ...(contentType ? { 'Content-Type': contentType } : {}) },
+        body,
+      });
+      assert.equal(response.status, 415);
+      assert.match(response.headers.get('content-type') ?? '', /application\/json/);
+      assert.equal(typeof (await response.json()).error, 'string');
+    }
+  }
+  assert.equal(upstreamCalls, 0);
+});
+
+test('rejects foreign origins on API writes with 403 JSON before calling upstream', async t => {
+  let upstreamCalls = 0;
+  const upstream = await listen(t, createServer((_req, res) => {
+    upstreamCalls++;
+    res.end('data: [DONE]\n\n');
+  }));
+  const url = await listen(t, createAppServer({ OPENCLAW_BASE_URL: upstream }));
+  const body = JSON.stringify({ prompt: 'a clock', lane: 'cerebras' });
+  for (const origin of ['https://foreign.example', 'null', `${url}.evil.example`, 'http://localhost:51730']) {
+    for (const [method, path] of [['POST', '/api/generate'], ['PUT', '/api/config'], ['DELETE', '/api/other'], ['PATCH', '/api']]) {
+      const response = await fetch(`${url}${path}`, {
+        method, headers: { 'Content-Type': 'application/json', 'Content-Length': String(Buffer.byteLength(body)), Origin: origin },
+        body,
+      });
+      assert.equal(response.status, 403);
+      assert.match(response.headers.get('content-type') ?? '', /application\/json/);
+      assert.equal(typeof (await response.json()).error, 'string');
+    }
+  }
+  assert.equal(upstreamCalls, 0);
+});
+
+test('allows same-origin, both dev origins, configured origins, and no Origin with JSON charset', async t => {
+  let upstreamCalls = 0;
+  const upstream = await listen(t, createServer((_req, res) => {
+    upstreamCalls++;
+    res.end('data: [DONE]\n\n');
+  }));
+  const url = await listen(t, createAppServer({
+    OPENCLAW_BASE_URL: upstream,
+    BLINK_ALLOWED_ORIGINS: ' https://one.example, , https://two.example ',
+  }));
+  const origins = [url, 'http://127.0.0.1:5173', 'http://localhost:5173', 'https://one.example', 'https://two.example', undefined];
+  for (const origin of origins) {
+    const response = await fetch(`${url}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=utf-8', ...(origin ? { Origin: origin } : {}) },
+      body: JSON.stringify({ prompt: 'a clock', lane: 'cerebras' }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(events(await response.text())[0].type, 'done');
+  }
+  assert.equal(upstreamCalls, origins.length);
+  const config = await fetch(`${url}/api/config`, { headers: { Origin: 'https://foreign.example' } });
+  assert.equal(config.status, 200);
+  await config.json();
+});
 
 for (const lane of ['cerebras', 'compare'] as const) {
   test(`${lane} forwards the contract to its upstream and streams deltas and measured stats`, { timeout: 5000 }, async t => {
@@ -153,10 +250,10 @@ test('rejects invalid JSON, types, lengths, and disabled lanes with 400 JSON bef
     assert.match(response.headers.get('content-type') ?? '', /application\/json/);
     assert.equal(typeof (await response.json()).error, 'string');
   }
-  const malformed = await fetch(`${url}/api/generate`, { method: 'POST', body: '{' });
+  const malformed = await fetch(`${url}/api/generate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{' });
   assert.equal(malformed.status, 400);
   assert.equal(typeof (await malformed.json()).error, 'string');
-  const oversized = await fetch(`${url}/api/generate`, { method: 'POST', body: 'x'.repeat(2_000_001) });
+  const oversized = await fetch(`${url}/api/generate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: 'x'.repeat(2_000_001) });
   assert.equal(oversized.status, 400);
   assert.equal(typeof (await oversized.json()).error, 'string');
   assert.equal(upstreamCalls, 0);
@@ -188,7 +285,7 @@ test('disconnecting a streaming client aborts the upstream response', { timeout:
   const url = await listen(t, createAppServer({ OPENCLAW_BASE_URL: upstream }));
   const controller = new AbortController();
   const response = await fetch(`${url}/api/generate`, {
-    method: 'POST', body: JSON.stringify({ prompt: 'a clock', lane: 'cerebras' }), signal: controller.signal,
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: 'a clock', lane: 'cerebras' }), signal: controller.signal,
   });
   const reader = response.body!.getReader();
   assert.equal((await reader.read()).done, false);
@@ -206,7 +303,7 @@ test('disconnecting before upstream headers aborts the pending upstream request'
   const url = await listen(t, createAppServer({ OPENCLAW_BASE_URL: upstream }));
   const controller = new AbortController();
   const response = await fetch(`${url}/api/generate`, {
-    method: 'POST', body: JSON.stringify({ prompt: 'a clock', lane: 'cerebras' }), signal: controller.signal,
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: 'a clock', lane: 'cerebras' }), signal: controller.signal,
   });
   await started.promise;
   controller.abort();
