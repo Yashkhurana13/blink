@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
+import { UpstreamBudget } from './budget.ts';
 import { AppDatabase, type SavedApp } from './db.ts';
 import { extractHtml, extractTitle } from './extract.ts';
 import { buildLaneRequest, getConfig, type GenerateRequest } from './lanes.ts';
@@ -13,8 +14,8 @@ export function json(res: ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body));
 }
 
-export function canRead(app: SavedApp, ipHash: string) {
-  return app.ipHash === ipHash || (app.shared && !app.hidden);
+export function canRead(app: SavedApp, creatorHash: string) {
+  return app.creatorHash === creatorHash || (app.shared && !app.hidden);
 }
 
 function validInput(body: unknown): body is GenerateRequest {
@@ -26,6 +27,7 @@ function validInput(body: unknown): body is GenerateRequest {
     && !(input.lane === 'compare' && input.variants === 4)
     && (input.remixOf === undefined || (typeof input.remixOf === 'string' && /^[A-Za-z0-9_-]{10}$/.test(input.remixOf)))
     && input.currentHtml === undefined
+    && (input.runId === undefined || (typeof input.runId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(input.runId)))
     && (input.conversationId === undefined || typeof input.conversationId === 'string');
 }
 
@@ -50,7 +52,7 @@ class UpstreamError extends Error {
 
 export async function generate(
   req: IncomingMessage, res: ServerResponse, env: NodeJS.ProcessEnv,
-  db: AppDatabase, scheduler: Scheduler, ipHash: string,
+  db: AppDatabase, scheduler: Scheduler, ipHash: string, creatorHash: string, budget: UpstreamBudget,
 ) {
   let input: unknown;
   try { input = await readBody(req); }
@@ -59,17 +61,19 @@ export async function generate(
     return;
   }
   if (!validInput(input) || (input.lane === 'compare' && !getConfig(env).compareEnabled)) {
-    json(res, 400, { error: 'Invalid prompt, variants, remixOf, lane, or conversationId' });
+    json(res, 400, { error: 'Invalid prompt, variants, remixOf, lane, conversationId, or runId' });
     return;
   }
   const parent = input.remixOf ? db.get(input.remixOf) : undefined;
-  if (input.remixOf && (!parent || !canRead(parent, ipHash) || Buffer.byteLength(parent.html) > 200_000)) {
+  if (input.remixOf && (!parent || !canRead(parent, creatorHash) || Buffer.byteLength(parent.html) > 200_000)) {
     json(res, 400, { error: 'App unavailable for remix' });
     return;
   }
   if (res.destroyed) return;
   const race = getConfig(env).compareEnabled && input.lane && (input.variants ?? 1) === 1 ? {
-    lane: input.lane, key: createHash('sha256').update(JSON.stringify([input.prompt, input.remixOf ?? null])).digest('hex'),
+    // Older clients omit runId; pair those by prompt without coupling the lanes' remix parents.
+    lane: input.lane, key: input.runId === undefined
+      ? `prompt:${createHash('sha256').update(input.prompt).digest('hex')}` : `run:${input.runId}`,
   } : undefined;
   const job = scheduler.reserve(ipHash, input.variants ?? 1, race);
   if ('error' in job) {
@@ -106,20 +110,27 @@ export async function generate(
       let timedOut = false;
       let firstToken = false;
       let text = '';
-      const timeout = setTimeout(() => { timedOut = true; upstreamController.abort(); }, 360_000);
-      timeout.unref();
+      let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
         const upstream = await buildLaneRequest({
           ...request, prompt: `${request.prompt}\n\nCreative direction: ${directions[variant]}.`,
+          conversationId: input.variants === 4 ? `${request.conversationId}:v${variant}` : request.conversationId,
         }, env);
         for (let attempt = 0; ; attempt++) {
           try {
             upstreamController.signal.throwIfAborted();
+            await budget.acquire(upstream.estimatedTokens, upstreamController.signal,
+              position => send({ type: 'queue', position }));
+            upstreamController.signal.throwIfAborted();
+            // Time spent waiting for shared quota or backoff is not an upstream timeout.
+            timeout = setTimeout(() => { timedOut = true; upstreamController.abort(); }, 360_000);
+            timeout.unref?.();
             send({ type: 'status', variant, phase: 'waiting_model' });
             const response = await fetch(upstream.url, {
               method: 'POST', headers: upstream.headers, body: upstream.body, signal: upstreamController.signal,
             });
             if (!response.ok || !response.body) {
+              if (response.status === 429) budget.pause(response.headers.get('Retry-After'));
               await response.body?.cancel();
               throw new UpstreamError(response.status === 429 || response.status >= 500, [401, 402, 403, 429].includes(response.status));
             }
@@ -140,12 +151,14 @@ export async function generate(
             if (attempt === 0 && !firstToken && !upstreamController.signal.aborted && networkError) continue;
             if (!(error instanceof UpstreamError) && networkError) throw new UpstreamError(true);
             throw error;
+          } finally {
+            clearTimeout(timeout);
           }
         }
         if (!controller.signal.aborted) {
           const html = extractHtml(text);
           const appId = html ? db.save({
-            title: extractTitle(html), prompt: request.prompt, html, ipHash, parentId: request.remixOf ?? null,
+            title: extractTitle(html), prompt: request.prompt, html, ipHash, creatorHash, parentId: request.remixOf ?? null,
           }).id : null;
           send({ type: 'done', variant, stats: tracker.finish(), appId });
         }

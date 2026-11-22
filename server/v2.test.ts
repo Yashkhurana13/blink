@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer, type RequestListener } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { AppDatabase } from './db.ts';
 import { createAppServer } from './index.ts';
@@ -22,16 +24,26 @@ function setup(t: TestContext, overrides: NodeJS.ProcessEnv = {}, handler: Reque
   const db = new AppDatabase(env);
   const url = listen(server);
   t.after(() => { server.emit('close'); db.close(); rmSync(dir, { recursive: true, force: true }); });
-  const post = (path: string, body: unknown = {}, ip = '203.0.113.1', extra: Record<string, string> = {}) => fetch(`${url}${path}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': ip, ...extra }, body: JSON.stringify(body),
-  });
-  const get = (path: string, ip = '203.0.113.1') => fetch(`${url}${path}`, { headers: { 'CF-Connecting-IP': ip } });
+  const cookies = new Map<string, string>();
+  const cookie = (ip = '203.0.113.1') => cookies.get(ip)!;
+  async function request(path: string, init: RequestInit, ip: string, extra: Record<string, string>) {
+    const response = await fetch(`${url}${path}`, {
+      ...init, headers: { 'CF-Connecting-IP': ip, ...(cookie(ip) ? { Cookie: cookie(ip) } : {}), ...extra },
+    });
+    const setCookie = response.headers.get('set-cookie');
+    if (setCookie && extra.Cookie === undefined) cookies.set(ip, setCookie.split(';')[0]);
+    return response;
+  }
+  const post = (path: string, body: unknown = {}, ip = '203.0.113.1', extra: Record<string, string> = {}) => request(path, {
+    method: 'POST', body: JSON.stringify(body),
+  }, ip, { 'Content-Type': 'application/json', ...extra });
+  const get = (path: string, ip = '203.0.113.1', extra: Record<string, string> = {}, method = 'GET') => request(path, { method }, ip, extra);
   async function generate(body: unknown = { prompt: 'a clock' }, ip?: string) {
     const response = await post('/api/generate', body, ip);
     assert.equal(response.status, 200);
     return events(await response.text());
   }
-  return { env, db, url, post, get, generate };
+  return { env, db, url, post, get, generate, cookie };
 }
 
 function deferred() {
@@ -39,6 +51,75 @@ function deferred() {
   const promise = new Promise<void>(done => { resolve = done; });
   return { promise, resolve };
 }
+
+test('creator cookies are random, persistent, salted, HttpOnly, and secure on HTTPS', async t => {
+  const api = setup(t, { BLINK_PUBLIC_ORIGIN: 'https://blink.example' });
+  const first = await api.get('/api/config');
+  const header = first.headers.get('set-cookie')!;
+  assert.match(header, /^blink_creator=[A-Za-z0-9_-]{43};/);
+  for (const flag of ['HttpOnly', 'SameSite=Lax', 'Path=/', 'Max-Age=31536000', 'Secure']) assert.ok(header.includes(flag));
+  const credential = api.cookie().split('=')[1];
+  assert.equal(Buffer.from(credential, 'base64url').length, 32);
+  assert.equal((await api.get('/missing')).headers.get('set-cookie'), null);
+  for (const Cookie of ['', 'blink_creator=bad', `blink_creator=${'A'.repeat(42)}B`]) {
+    const response = await api.get('/missing', undefined, { Cookie });
+    assert.match(response.headers.get('set-cookie')!, /^blink_creator=[A-Za-z0-9_-]{43};/);
+    assert.notEqual(response.headers.get('set-cookie')!.split(';')[0], api.cookie());
+  }
+  const id = (await api.generate()).find(e => e.type === 'done').appId;
+  const app = api.db.get(id)!;
+  assert.equal(app.creatorHash, createHash('sha256').update('test').update(credential).digest('hex'));
+  assert.notEqual(app.creatorHash, credential);
+  const http = setup(t);
+  assert.doesNotMatch((await http.get('/api/config')).headers.get('set-cookie')!, /; Secure/);
+});
+
+test('ownership follows the browser across IPs and denies another browser on the same IP', async t => {
+  const api = setup(t);
+  const id = (await api.generate()).find(e => e.type === 'done').appId;
+  const owner = { Cookie: api.cookie() };
+  const stranger = { Cookie: `blink_creator=${randomBytes(32).toString('base64url')}` };
+  for (const path of [`/api/apps/${id}`, `/raw/${id}`]) {
+    assert.equal((await api.get(path, undefined, stranger)).status, 404);
+    assert.equal((await api.get(path, '198.51.100.1', owner)).status, 200);
+  }
+  assert.equal((await api.post(`/api/apps/${id}/share`, {}, undefined, stranger)).status, 403);
+  assert.equal((await api.post('/api/generate', { prompt: 'blue', remixOf: id }, undefined, stranger)).status, 400);
+  const remix = await api.post('/api/generate', { prompt: 'blue', remixOf: id }, '198.51.100.1', owner);
+  assert.equal(remix.status, 200);
+  assert.ok(events(await remix.text()).some(e => e.type === 'done'));
+  assert.equal((await api.post(`/api/apps/${id}/share`, {}, '198.51.100.2', owner)).status, 200);
+});
+
+test('metadata only discloses shared, visible parents, including to the child creator', async t => {
+  const api = setup(t);
+  const parent = (await api.generate()).find(e => e.type === 'done').appId;
+  const child = (await api.generate({ prompt: 'blue', remixOf: parent })).find(e => e.type === 'done').appId;
+  await api.post(`/api/apps/${child}/share`);
+  for (const ip of ['203.0.113.1', '203.0.113.2']) {
+    assert.equal((await (await api.get(`/api/apps/${child}`, ip)).json()).parentId, null);
+  }
+  await api.post(`/api/apps/${parent}/share`);
+  assert.equal((await (await api.get(`/api/apps/${child}`, '203.0.113.2')).json()).parentId, parent);
+  api.db.hide(parent);
+  assert.equal((await (await api.get(`/api/apps/${child}`)).json()).parentId, null);
+});
+
+test('GET and HEAD share/raw responses have the same isolation headers and HEAD has no body', async t => {
+  const api = setup(t);
+  const id = (await api.generate()).find(e => e.type === 'done').appId;
+  await api.post(`/api/apps/${id}/share`);
+  for (const path of [`/a/${id}`, `/raw/${id}`, '/raw/unknown', '/raw/abcdefghij']) {
+    const get = await api.get(path);
+    const head = await api.get(path, undefined, {}, 'HEAD');
+    assert.equal(head.status, get.status);
+    for (const header of ['content-type', 'content-security-policy', 'x-content-type-options', 'cache-control']) {
+      assert.equal(head.headers.get(header), get.headers.get(header));
+    }
+    assert.equal(await head.text(), '');
+    if (path.startsWith('/raw/')) assert.equal(get.headers.get('content-security-policy'), CSP);
+  }
+});
 
 test('x4 fans out concurrently, tags every variant, applies directions, and saves extracted HTML', async t => {
   const requests: any[] = [];
@@ -51,8 +132,9 @@ test('x4 fans out concurrently, tags every variant, applies directions, and save
     await allStarted.promise;
     res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: 'Here it is:\n```html\n' + HTML + '\n```' } }] })}\n\ndata: [DONE]\n\n`);
   });
-  const stream = await api.generate({ prompt: 'a clock', variants: 4 });
+  const stream = await api.generate({ prompt: 'a clock', variants: 4, conversationId: 'browser-run' });
   assert.equal(requests.length, 4);
+  assert.deepEqual(requests.map(r => r.user).sort(), ['browser-run:v0', 'browser-run:v1', 'browser-run:v2', 'browser-run:v3']);
   assert.deepEqual(stream[0], { type: 'queue', position: 0 });
   assert.deepEqual(stream.at(-1), { type: 'end' });
   const ids = new Set<string>();
@@ -130,7 +212,7 @@ test('sharing is creator-only; metadata omits identity; private raw is creator-o
 test('share pages escape text and include absolute OG/Twitter URLs, isolated iframe, links, and report script', async t => {
   const api = setup(t, { BLINK_PUBLIC_ORIGIN: 'https://blink.example/' });
   const evil = '</title><script>alert("x")</script><title>&';
-  const app = api.db.save({ title: evil, prompt: '\"><img src=x onerror=alert(1)>&', html: HTML, ipHash: 'hash', parentId: null });
+  const app = api.db.save({ title: evil, prompt: '\"><img src=x onerror=alert(1)>&', html: HTML, ipHash: 'hash', creatorHash: 'hash', parentId: null });
   api.db.share(app.id, 'hash');
   const page = await (await api.get(`/a/${app.id}`)).text();
   assert.doesNotMatch(page, /<script>alert|<img src=x/);
@@ -140,7 +222,11 @@ test('share pages escape text and include absolute OG/Twitter URLs, isolated ifr
   assert.match(page, /property="og:image" content="https:\/\/blink.example\/og.png"/);
   assert.match(page, /name="twitter:card" content="summary_large_image"/);
   assert.match(page, /name="twitter:image" content="https:\/\/blink.example\/og.png"/);
-  assert.match(page, new RegExp(`<iframe[^>]*sandbox="allow-scripts"[^>]*src="/raw/${app.id}"`));
+  const iframe = page.match(/<iframe[^>]*>/)![0];
+  assert.ok(iframe.includes(`src="/raw/${app.id}"`));
+  assert.doesNotMatch(iframe, /\bsandbox\s*=/);
+  assert.match(iframe, /referrerpolicy="no-referrer"/);
+  assert.match(iframe, /allow=""/);
   assert.match(page, /href="\/">Make your own/);
   assert.match(page, new RegExp(`href="/\\?remix=${app.id}">Remix this`));
   assert.match(page, /<button[^>]*>Report<\/button>/);
@@ -157,7 +243,7 @@ test('gallery pages newest shared apps without timestamp gaps, private apps, or 
   const api = setup(t);
   const ids: string[] = [];
   for (let i = 0; i < 6; i++) {
-    const app = api.db.save({ title: `${i}`, prompt: `${i}`, html: HTML, ipHash: 'hash', parentId: null });
+    const app = api.db.save({ title: `${i}`, prompt: `${i}`, html: HTML, ipHash: 'hash', creatorHash: 'hash', parentId: null });
     ids.push(app.id);
     if (i !== 0) api.db.share(app.id, 'hash');
   }
@@ -212,7 +298,7 @@ test('remixes load saved HTML on the server, record parentId, and reject untrust
   assert.equal((await api.post('/api/generate', { prompt: 'x', currentHtml: HTML })).status, 400);
   await api.post(`/api/apps/${id}/share`);
   assert.ok((await api.generate({ prompt: 'blue', remixOf: id }, '203.0.113.2')).some(e => e.appId));
-  const big = api.db.save({ title: 'big', prompt: 'x', html: '<html>' + '🌟'.repeat(50_000) + '</html>', ipHash: api.db.get(id)!.ipHash, parentId: null });
+  const big = api.db.save({ title: 'big', prompt: 'x', html: '<html>' + '🌟'.repeat(50_000) + '</html>', ipHash: api.db.get(id)!.ipHash, creatorHash: api.db.get(id)!.creatorHash, parentId: null });
   assert.equal((await api.post('/api/generate', { prompt: 'x', remixOf: big.id })).status, 400);
 });
 
@@ -224,7 +310,7 @@ for (const failure of ['429', '503', 'network', 'body-network'] as const) {
       if (calls === 1) {
         if (failure === 'network') return req.socket.destroy();
         if (failure === 'body-network') { res.writeHead(200); res.flushHeaders(); return req.socket.destroy(); }
-        res.writeHead(Number(failure));
+        res.writeHead(Number(failure), { 'Retry-After': '0' });
         return res.end('secret');
       }
       res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: HTML } }] })}\n\ndata: [DONE]\n\n`);
@@ -252,7 +338,7 @@ test('does not retry a network failure after the first token or persist a partia
 
 test('persistent upstream rate errors are safe, friendly and end every variant', async t => {
   let calls = 0;
-  const api = setup(t, {}, (_req, res) => { calls++; res.writeHead(429); res.end('token-secret'); });
+  const api = setup(t, {}, (_req, res) => { calls++; res.writeHead(429, { 'Retry-After': '0' }); res.end('token-secret'); });
   const stream = await api.generate();
   assert.equal(calls, 2);
   const error = stream.find(e => e.type === 'error');
@@ -404,4 +490,229 @@ test('share metadata falls back to absolute request-origin URLs without public-o
   const page = await (await api.get(`/a/${id}`)).text();
   assert.ok(page.includes(`content="${api.url}/a/${id}"`));
   assert.ok(page.includes(`content="${api.url}/og.png"`));
+});
+
+test('race runId pairs lanes with different remix parents and rejects other run IDs', async t => {
+  const gate = deferred();
+  t.after(() => gate.resolve());
+  let block = false;
+  const api = setup(t, {
+    COMPARE_BASE_URL: 'http://blink-test-1/v1', COMPARE_API_KEY: 'secret', COMPARE_MODEL: 'model', COMPARE_LABEL: 'GPU',
+  }, async (_req, res) => {
+    if (block) await gate.promise;
+    res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: HTML } }] })}\n\ndata: [DONE]\n\n`);
+  });
+  const parentA = (await api.generate()).find(e => e.type === 'done').appId;
+  const parentB = (await api.generate()).find(e => e.type === 'done').appId;
+  block = true;
+  const first = await api.post('/api/generate', { prompt: 'blue', lane: 'cerebras', remixOf: parentA, runId: 'race_1' });
+  assert.equal(first.status, 200);
+  const other = await api.post('/api/generate', { prompt: 'blue', lane: 'compare', remixOf: parentA, runId: 'race_2' });
+  assert.equal(other.status, 429);
+  const second = await api.post('/api/generate', { prompt: 'blue', lane: 'compare', remixOf: parentB, runId: 'race_1' });
+  assert.equal(second.status, 200);
+  assert.equal((await api.post('/api/generate', { prompt: 'blue', lane: 'compare', runId: 'race_1' })).status, 429);
+  gate.resolve();
+  for (const [response, parent] of [[first, parentA], [second, parentB]] as const) {
+    const id = events(await response.text()).find(e => e.type === 'done').appId;
+    assert.equal(api.db.get(id)?.parentId, parent);
+  }
+  for (const runId of ['', 'x'.repeat(65), 'with space', 'with:colon', 7, null, 'line\nbreak']) {
+    assert.equal((await api.post('/api/generate', { prompt: 'x', runId })).status, 400);
+  }
+  assert.ok((await api.generate({ prompt: 'x', runId: 'A-_9'.repeat(16) })).some(e => e.type === 'done'));
+});
+
+test('global job admission is independent of identity and IPv6 rotation shares hourly limits', async t => {
+  const api = setup(t, { GLOBAL_JOBS_PER_MIN: '2', HOURLY_LIMIT: '1' });
+  await api.generate({ prompt: 'one' }, '2001:db8:1:2::1');
+  const rotated = await api.post('/api/generate', { prompt: 'two' }, '2001:db8:1:2::2');
+  assert.equal(rotated.status, 429);
+  await api.generate({ prompt: 'three' }, '2001:db8:1:3::1');
+  const aggregate = await api.post('/api/generate', { prompt: 'four' }, '198.51.100.1');
+  assert.equal(aggregate.status, 429);
+  assert.ok(Number(aggregate.headers.get('retry-after')) > 0);
+});
+
+test('report hiding counts distinct normalized networks and ignores private or already hidden apps', async t => {
+  const api = setup(t);
+  const id = (await api.generate()).find(e => e.type === 'done').appId;
+  const observer = new DatabaseSync(join(api.env.BLINK_DATA_DIR, 'blink.db'));
+  t.after(() => observer.close());
+  const before = observer.prepare('PRAGMA data_version').get();
+  assert.deepEqual(await (await api.post(`/api/apps/${id}/report`)).json(), { ok: true });
+  assert.deepEqual(observer.prepare('PRAGMA data_version').get(), before);
+  await api.post(`/api/apps/${id}/share`);
+  for (const ip of ['2001:db8:1:2::1', '2001:0db8:1:2:ffff::2', '2001:db8:1:2::3', '::ffff:203.0.113.8', '203.0.113.8']) {
+    assert.deepEqual(await (await api.post(`/api/apps/${id}/report`, {}, ip)).json(), { ok: true });
+  }
+  assert.equal(api.db.get(id)?.hidden, false);
+  assert.equal(observer.prepare('SELECT COUNT(*) AS n FROM reports').get()!.n, 2);
+  await api.post(`/api/apps/${id}/report`, {}, '2001:db8:1:3::1');
+  assert.equal(api.db.get(id)?.hidden, true);
+  const hiddenVersion = observer.prepare('PRAGMA data_version').get();
+  assert.deepEqual(await (await api.post(`/api/apps/${id}/report`, {}, '198.51.100.1')).json(), { ok: true });
+  assert.deepEqual(observer.prepare('PRAGMA data_version').get(), hiddenVersion);
+});
+
+test('report write limit is checked before SQLite and shares the normalized abuse key', async t => {
+  const api = setup(t, { REPORTS_PER_HOUR: '2' });
+  const ids: string[] = [];
+  for (let i = 0; i < 3; i++) {
+    const id = (await api.generate()).find(e => e.type === 'done').appId;
+    await api.post(`/api/apps/${id}/share`);
+    ids.push(id);
+  }
+  for (const [i, ip] of ['2001:db8:1:2::1', '2001:db8:1:2::2'].entries()) {
+    assert.equal((await api.post(`/api/apps/${ids[i]}/report`, {}, ip)).status, 200);
+  }
+  const get = t.mock.method(AppDatabase.prototype, 'get', () => { throw new Error('Rate-limited reports must not touch SQLite'); });
+  const limited = await api.post(`/api/apps/${ids[2]}/report`, {}, '2001:db8:1:2::3');
+  assert.equal(limited.status, 429);
+  assert.ok(Number(limited.headers.get('retry-after')) > 3500);
+  assert.equal((await limited.json()).error, 'rate_limited');
+  get.mock.restore();
+  assert.equal((await api.post(`/api/apps/${ids[2]}/report`, {}, '2001:db8:1:3::1')).status, 200);
+});
+
+for (const limit of [{ REQUESTS_PER_MIN: '2' }, { TOKENS_PER_MIN: '14100' }]) {
+  test(`x4 attempts wait in the queue for the shared ${Object.keys(limit)[0]} budget`, async t => {
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1000 });
+    let calls = 0;
+    const api = setup(t, limit, (_req, res) => {
+      calls++;
+      res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: HTML } }] })}\n\ndata: [DONE]\n\n`);
+    });
+    const response = await api.post('/api/generate', { prompt: 'clock', variants: 4 });
+    await new Promise(setImmediate);
+    assert.equal(calls, 2);
+    t.mock.timers.tick(59_999);
+    await new Promise(setImmediate);
+    assert.equal(calls, 2);
+    t.mock.timers.tick(1);
+    const stream = events(await response.text());
+    assert.equal(calls, 4);
+    assert.equal(stream.filter(e => e.type === 'done').length, 4);
+    assert.ok(stream.some(e => e.type === 'queue' && e.position > 0));
+    assert.ok(stream.some(e => e.type === 'queue' && e.position === 0));
+    assert.equal(stream.filter(e => e.type === 'status').length, 4);
+  });
+}
+
+for (const limit of [{ REQUESTS_PER_MIN: '1' }, { TOKENS_PER_MIN: '14000' }]) {
+  test(`retries consume the same ${Object.keys(limit)[0]} budget as new attempts`, async t => {
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1000 });
+    let calls = 0;
+    const api = setup(t, limit, (_req, res) => {
+      if (++calls === 1) { res.writeHead(503); return res.end(); }
+      res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: HTML } }] })}\n\ndata: [DONE]\n\n`);
+    });
+    const response = await api.post('/api/generate', { prompt: 'clock' });
+    await new Promise(setImmediate);
+    assert.equal(calls, 1);
+    t.mock.timers.tick(59_999);
+    await new Promise(setImmediate);
+    assert.equal(calls, 1);
+    t.mock.timers.tick(1);
+    const stream = events(await response.text());
+    assert.equal(calls, 2);
+    assert.equal(stream.filter(e => e.type === 'done').length, 1);
+    assert.ok(stream.some(e => e.type === 'queue' && e.position > 0));
+  });
+}
+
+for (const retryAfter of [undefined, '5', 'Thu, 01 Jan 1970 00:00:07 GMT', '400']) {
+  test(`upstream 429 pauses new jobs and its retry for Retry-After ${retryAfter}`, async t => {
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 });
+    let calls = 0;
+    const api = setup(t, {}, (_req, res) => {
+      if (++calls === 1) {
+        res.writeHead(429, retryAfter === undefined ? {} : { 'Retry-After': retryAfter });
+        return res.end('secret');
+      }
+      res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: HTML } }] })}\n\ndata: [DONE]\n\n`);
+    });
+    const first = await api.post('/api/generate', { prompt: 'first' });
+    await new Promise(setImmediate);
+    const second = await api.post('/api/generate', { prompt: 'second' }, '203.0.113.2');
+    await new Promise(setImmediate);
+    assert.equal(calls, 1);
+    const delay = retryAfter === undefined ? 20_000 : retryAfter.includes('GMT') ? 7000 : Number(retryAfter) * 1000;
+    t.mock.timers.tick(delay - 1);
+    await new Promise(setImmediate);
+    assert.equal(calls, 1);
+    t.mock.timers.tick(1);
+    for (const response of [first, second]) {
+      const stream = events(await response.text());
+      assert.ok(stream.some(e => e.type === 'queue' && e.position > 0));
+      assert.equal(stream.filter(e => e.type === 'done').length, 1);
+      assert.equal(stream.filter(e => e.type === 'error').length, 0);
+    }
+    assert.equal(calls, 3);
+  });
+}
+
+test('upstream admission budget is shared across clients and race lanes', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 });
+  let calls = 0;
+  const api = setup(t, {
+    REQUESTS_PER_MIN: '1', COMPARE_BASE_URL: 'http://blink-test-1/v1',
+    COMPARE_API_KEY: 'secret', COMPARE_MODEL: 'model', COMPARE_LABEL: 'GPU',
+  }, (_req, res) => { calls++; res.end('data: [DONE]\n\n'); });
+  await api.generate({ prompt: 'one', lane: 'cerebras' });
+  const next = await api.post('/api/generate', { prompt: 'two', lane: 'compare' }, '203.0.113.2');
+  const reader = next.body!.getReader();
+  const decoder = new TextDecoder();
+  let text = '';
+  while (!text.includes('"position":1')) {
+    const chunk = await reader.read();
+    assert.equal(chunk.done, false);
+    text += decoder.decode(chunk.value);
+  }
+  assert.equal(calls, 1);
+  t.mock.timers.tick(60_000);
+  for (;;) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    text += decoder.decode(chunk.value);
+  }
+  const stream = events(text);
+  assert.equal(calls, 2);
+  assert.deepEqual(stream.filter(e => e.type === 'queue').map(e => e.position), [0, 1, 0]);
+});
+
+test('disconnecting during quota wait cancels the attempt and leaves budget for the next job', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 });
+  let calls = 0;
+  const api = setup(t, { REQUESTS_PER_MIN: '1', MAX_CONCURRENT: '1' }, (_req, res) => {
+    calls++;
+    res.end('data: [DONE]\n\n');
+  });
+  await api.generate();
+  const controller = new AbortController();
+  const cancelled = await fetch(`${api.url}/api/generate`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '203.0.113.2' },
+    body: JSON.stringify({ prompt: 'cancel' }), signal: controller.signal,
+  });
+  await new Promise(setImmediate);
+  controller.abort();
+  await assert.rejects(cancelled.text());
+  const next = await api.post('/api/generate', { prompt: 'next' }, '203.0.113.3');
+  t.mock.timers.tick(60_000);
+  assert.ok(events(await next.text()).some(e => e.type === 'done'));
+  assert.equal(calls, 2);
+});
+
+test('default report limit permits ten writes per normalized identity and resets after an hour', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1000 });
+  const api = setup(t);
+  const id = (await api.generate()).find(e => e.type === 'done').appId;
+  for (let i = 0; i < 11; i++) assert.equal((await api.post(`/api/apps/${id}/report`)).status, 200);
+  await api.post(`/api/apps/${id}/share`);
+  for (let i = 0; i < 10; i++) assert.equal((await api.post(`/api/apps/${id}/report`)).status, 200);
+  assert.equal((await api.post(`/api/apps/${id}/report`)).status, 429);
+  t.mock.timers.tick(3_599_999);
+  assert.equal((await api.post(`/api/apps/${id}/report`)).status, 429);
+  t.mock.timers.tick(1);
+  assert.equal((await api.post(`/api/apps/${id}/report`)).status, 200);
 });

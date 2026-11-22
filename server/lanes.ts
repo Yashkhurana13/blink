@@ -4,6 +4,7 @@ import { buildMessages } from './prompt.ts';
 export type GenerateRequest = {
   prompt: string;
   conversationId?: string;
+  runId?: string;
   variants?: 1 | 4;
   remixOf?: string;
   lane?: 'cerebras' | 'compare';
@@ -28,6 +29,7 @@ export async function buildLaneRequest(input: GenerateRequest & { currentHtml?: 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
   return {
+    estimatedTokens: Math.ceil(messages.reduce((chars, message) => chars + message.content.length, 0) / 4) + 7000,
     url: `${base.replace(/\/+$/, '')}${compare ? '/chat/completions' : '/v1/chat/completions'}`,
     headers,
     body: JSON.stringify({

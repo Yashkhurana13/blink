@@ -35,3 +35,14 @@ test('generated salt survives restart and is never a raw client IP', t => {
   assert.notEqual(first, '203.0.113.1');
   assert.notEqual(createClientIdentity({ ...env, BLINK_SALT: 'other' })(request('203.0.113.1')), first);
 });
+
+test('abuse identities normalize IPv6 to /64 and IPv4-mapped addresses to full IPv4', () => {
+  const identify = createClientIdentity({ BLINK_SALT: 'test' });
+  const key = (ip: string) => identify(request('127.0.0.1', ip));
+  assert.equal(key('2001:db8:abcd:1234::1'), key('2001:0DB8:abcd:1234:ffff:ffff:ffff:ffff'));
+  assert.notEqual(key('2001:db8:abcd:1234::1'), key('2001:db8:abcd:1235::1'));
+  assert.equal(key('::ffff:203.0.113.9'), key('203.0.113.9'));
+  assert.equal(key('::ffff:cb00:7109'), key('203.0.113.9'));
+  assert.notEqual(key('203.0.113.9'), key('203.0.113.10'));
+  assert.equal(identify(request('::ffff:7f00:1', '203.0.113.9')), key('203.0.113.9'));
+});

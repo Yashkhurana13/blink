@@ -3,11 +3,12 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { createClientIdentity } from './client.ts';
+import { createClientIdentity, createCreatorIdentity } from './client.ts';
+import { UpstreamBudget } from './budget.ts';
 import { AppDatabase, appMetadata } from './db.ts';
 import { canRead, generate, json } from './generate.ts';
 import { getConfig, getPublicOrigin } from './lanes.ts';
-import { positiveInteger, Scheduler } from './queue.ts';
+import { positiveInteger, RollingLimit, Scheduler } from './queue.ts';
 import { RAW_CSP, sharePage } from './share.ts';
 
 const webRoot = fileURLToPath(new URL('../dist/web/', import.meta.url));
@@ -26,14 +27,27 @@ function adminAuthorized(authorization: string | undefined, token: string) {
 export function createAppServer(env: NodeJS.ProcessEnv = process.env) {
   const db = new AppDatabase(env);
   const identify = createClientIdentity(env);
+  const identifyCreator = createCreatorIdentity(env);
   const scheduler = new Scheduler({
     maxConcurrent: positiveInteger(env.MAX_CONCURRENT, 8),
     maxQueue: positiveInteger(env.MAX_QUEUE, 40, 0),
     hourlyLimit: positiveInteger(env.HOURLY_LIMIT, 30),
+    globalJobsPerMin: positiveInteger(env.GLOBAL_JOBS_PER_MIN, 40),
   });
+  const budget = new UpstreamBudget({
+    requestsPerMin: positiveInteger(env.REQUESTS_PER_MIN, 80),
+    tokensPerMin: positiveInteger(env.TOKENS_PER_MIN, 90_000),
+  });
+  const reportLimit = new RollingLimit(positiveInteger(env.REPORTS_PER_HOUR, 10), 3_600_000);
   const server = createServer(async (req, res) => {
     try {
+      const creatorHash = identifyCreator(req, res);
       const url = new URL(req.url ?? '/', 'http://localhost');
+      if (url.pathname === '/raw' || url.pathname.startsWith('/raw/')) {
+        res.setHeader('Content-Security-Policy', RAW_CSP);
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        res.setHeader('Cache-Control', 'private, no-store');
+      }
       const pathname = decodeURIComponent(url.pathname);
       if ((pathname === '/api' || pathname.startsWith('/api/')) && req.method !== 'GET') {
         if (req.headers['content-type']?.split(';', 1)[0].trim().toLowerCase() !== 'application/json') {
@@ -55,7 +69,7 @@ export function createAppServer(env: NodeJS.ProcessEnv = process.env) {
         return;
       }
       if (pathname === '/api/generate' && req.method === 'POST') {
-        await generate(req, res, env, db, scheduler, identify(req));
+        await generate(req, res, env, db, scheduler, identify(req), creatorHash, budget);
         return;
       }
       if (pathname === '/api/gallery' && req.method === 'GET') {
@@ -79,17 +93,31 @@ export function createAppServer(env: NodeJS.ProcessEnv = process.env) {
       }
       const appRoute = pathname.match(/^\/api\/apps\/([A-Za-z0-9_-]{10})(?:\/(share|report))?$/);
       if (appRoute) {
+        const reportKey = appRoute[2] === 'report' && req.method === 'POST' ? identify(req) : undefined;
+        if (reportKey) {
+          const retryAfterSec = reportLimit.retryAfter(reportKey);
+          if (retryAfterSec) {
+            res.setHeader('Retry-After', retryAfterSec);
+            json(res, 429, { error: 'rate_limited', retryAfterSec });
+            return;
+          }
+        }
         const app = db.get(appRoute[1]);
-        const ipHash = identify(req);
         if (!app) json(res, 404, { error: 'Not found' });
         else if (!appRoute[2] && req.method === 'GET') {
-          if (canRead(app, ipHash)) json(res, 200, appMetadata(app));
+          if (canRead(app, creatorHash)) {
+            const parent = app.parentId ? db.get(app.parentId) : undefined;
+            json(res, 200, appMetadata(app, parent?.shared && !parent.hidden ? parent.id : null));
+          }
           else json(res, 404, { error: 'Not found' });
         } else if (appRoute[2] === 'share' && req.method === 'POST') {
-          if (db.share(app.id, ipHash)) json(res, 200, { url: `/a/${app.id}` });
+          if (db.share(app.id, creatorHash)) json(res, 200, { url: `/a/${app.id}` });
           else json(res, 403, { error: 'Only the creator can share this app' });
-        } else if (appRoute[2] === 'report' && req.method === 'POST' && app.shared) {
-          db.report(app.id, ipHash);
+        } else if (appRoute[2] === 'report' && req.method === 'POST') {
+          if (app.shared && !app.hidden) {
+            reportLimit.record(reportKey!);
+            db.report(app.id, reportKey!);
+          }
           json(res, 200, { ok: true });
         } else json(res, 404, { error: 'Not found' });
         return;
@@ -99,20 +127,20 @@ export function createAppServer(env: NodeJS.ProcessEnv = process.env) {
         return;
       }
       const pageRoute = pathname.match(/^\/(a|raw)\/([A-Za-z0-9_-]{10})$/);
-      if (pageRoute && req.method === 'GET') {
+      if (pageRoute && (req.method === 'GET' || req.method === 'HEAD')) {
         const app = db.get(pageRoute[2]);
-        if (!app || (pageRoute[1] === 'a' ? !app.shared || app.hidden : !canRead(app, identify(req)))) {
+        if (!app || (pageRoute[1] === 'a' ? !app.shared || app.hidden : !canRead(app, creatorHash))) {
           res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' }).end('<!doctype html><title>Not found · Blink</title><h1>App not found</h1><a href="/">Make your own</a>');
         } else if (pageRoute[1] === 'raw') {
           res.writeHead(200, {
             'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': RAW_CSP,
             'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store',
           });
-          res.end(app.html);
+          res.end(req.method === 'HEAD' ? undefined : app.html);
         } else {
           const origin = getPublicOrigin(env) ?? `http://${req.headers.host ?? 'localhost'}`;
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-          res.end(sharePage(app, origin));
+          res.end(req.method === 'HEAD' ? undefined : sharePage(app, origin));
         }
         return;
       }

@@ -87,7 +87,7 @@ test('a matching race pair is one client run, with both lanes charged and slots 
 });
 
 test('defaults allow eight upstream slots, forty waiting jobs, and thirty generations per hour', () => {
-  const queue = new Scheduler();
+  const queue = new Scheduler({ globalJobsPerMin: 100 });
   const active = Array.from({ length: 8 }, (_, i) => job(queue.reserve(`active-${i}`, 1)));
   const waiting = Array.from({ length: 40 }, (_, i) => job(queue.reserve(`waiting-${i}`, 1)));
   assert.equal((queue.reserve('overflow', 1) as any).error, 'busy');
@@ -95,4 +95,22 @@ test('defaults allow eight upstream slots, forty waiting jobs, and thirty genera
   for (const ticket of active) ticket.release();
   for (let i = 0; i < 30; i++) job(queue.reserve('capped', 1)).release();
   assert.equal((queue.reserve('capped', 1) as any).error, 'rate_limited');
+});
+
+test('global admission counts jobs across identities and expires after a rolling minute', t => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1000 });
+  const queue = new Scheduler({ globalJobsPerMin: 2 });
+  job(queue.reserve('a', 4)).release();
+  t.mock.timers.tick(1000);
+  job(queue.reserve('b', 1)).release();
+  assert.deepEqual(queue.reserve('rotated', 1), { error: 'rate_limited', retryAfterSec: 59 });
+  t.mock.timers.tick(59_000);
+  job(queue.reserve('c', 1)).release();
+  assert.deepEqual(queue.reserve('d', 1), { error: 'rate_limited', retryAfterSec: 1 });
+});
+
+test('default global admission admits forty new jobs per minute across identities', () => {
+  const queue = new Scheduler();
+  for (let i = 0; i < 40; i++) job(queue.reserve(`client-${i}`, 1)).release();
+  assert.deepEqual(queue.reserve('overflow', 1), { error: 'rate_limited', retryAfterSec: 60 });
 });
