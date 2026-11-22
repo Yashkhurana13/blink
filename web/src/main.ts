@@ -241,8 +241,10 @@ function renderStats(lane: LaneState) {
     : lane.streaming ? 'Live estimate · chars ÷ 4' : lane.error ? 'Generation interrupted' : 'Waiting for your idea';
   element('.token-label', lane.root).textContent = lane.stats?.tokensEstimated || lane.streaming ? 'Estimated tokens' : 'Output tokens';
   if (lane.root.classList.contains('frame')) {
+    const totalMs = lane.stats?.totalMs ?? (lane.started ? elapsed : null);
+    const seconds = totalMs === null ? '—' : (totalMs / 1000).toFixed(1);
     element('.frame-metrics', lane.root).textContent = lane.error ? 'Needs attention' : lane.text
-      ? `${values.speed} tok/s · ${values.total} s` : lane.position > 0 ? `Queue #${lane.position}` : 'Waiting';
+      ? `${values.speed} tok/s · ${seconds} s` : lane.position > 0 ? `Queue #${lane.position}` : 'Waiting';
   }
 }
 
@@ -254,12 +256,14 @@ function renderLane(lane: LaneState) {
   lane.status.textContent = lane.error ? 'Needs attention' : lane.streaming
     ? generationStatus(lane, lane.position, performance.now()) : lane.html ? 'Ready to play' : 'Ready to Blink';
   if (lane.root.classList.contains('frame')) {
-    const state = lane.error ? 'error' : lane.phase === 'done' ? 'done' : lane.phase === 'streaming' ? 'developing' : 'queued';
+    const hasCompletedHtml = lane.phase === 'done' && !!lane.html;
+    const state = hasCompletedHtml ? (lane.error ? 'preview-error' : 'done') : lane.error || lane.phase === 'done' ? 'error' : lane.phase === 'streaming' ? 'developing' : 'queued';
     lane.root.setAttribute('data-state', state);
+    element('.use-variant', lane.root).hidden = !hasCompletedHtml;
     element('.code-rain', lane.root).textContent = lane.text;
     if (state === 'queued' && lane.position === 0) {
       const seconds = Math.max(0, Math.floor((performance.now() - (lane.waitingAt ?? lane.started)) / 1000));
-      lane.status.textContent = `Waiting for Cerebras · ${seconds} s`;
+      lane.status.textContent = `Waiting for Cerebras · ${seconds}\u00a0s`;
     }
     const completed = variantLanes.filter(variant => variant.phase === 'done').length;
     const tokens = variantLanes.reduce((sum, variant) => sum + (variant.stats?.outputTokens ?? 0), 0);
@@ -367,9 +371,8 @@ function scheduleRender() {
 }
 
 function chooseVariation(lane: LaneState) {
-  if (controller || !choosingVariation || !lane.html || lane.phase !== 'done') return;
+  if (choiceTimer || controller || !choosingVariation || !lane.html || lane.phase !== 'done') return;
   for (const variant of variantLanes) variant.root.classList.toggle('chosen', variant === lane);
-  window.clearTimeout(choiceTimer);
   const expand = () => {
     choiceTimer = 0;
     if (controller || !choosingVariation) return;
@@ -395,7 +398,8 @@ function chooseVariation(lane: LaneState) {
     prompt.focus();
   };
   // Keep the circle visible before expanding into the existing workspace.
-  choiceTimer = window.setTimeout(expand, window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 550);
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) expand();
+  else choiceTimer = window.setTimeout(expand, 700);
 }
 
 async function shareLane(lane: LaneState) {
@@ -446,6 +450,7 @@ form.addEventListener('submit', event => {
 async function runGeneration(request: NonNullable<typeof lastRun>) {
   if (controller || remixLoading) return;
   window.clearTimeout(choiceTimer);
+  choiceTimer = 0;
   lastRun = request;
   const run = new AbortController();
   controller = run;
@@ -588,6 +593,7 @@ newButton.addEventListener('click', () => {
   remixLoading = false;
   window.clearInterval(retryTimer);
   window.clearTimeout(choiceTimer);
+  choiceTimer = 0;
   lastRun = null;
   choosingVariation = false;
   variationsStrip.hidden = true;

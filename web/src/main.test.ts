@@ -90,6 +90,7 @@ const stats = { ttftMs: 10, totalMs: 100, outputTokens: 20, tokensPerSecond: 200
 function app(hidden = false, overrides: Record<string, unknown> = {}) {
   const document = Object.assign(new Element(), { hidden, createElement: () => new Element() });
   const timers = new Map<number, () => void>();
+  const timerDelays = new Map<number, number>();
   const handlers = new Map<string, (event: any) => void>();
   const generations: { body: any; onEvent: (event: GenerateEvent) => void; resolve: () => void }[] = [];
   let nextTimer = 0;
@@ -108,8 +109,9 @@ function app(hidden = false, overrides: Record<string, unknown> = {}) {
       matchMedia: () => ({ matches: false }),
       addEventListener: (type: string, handler: (event: any) => void) => handlers.set(type, handler),
       setTimeout: (callback: () => void, delay: number) => {
-        assert.ok(delay === 6000 || delay === 4000 || delay === 550 || delay === 0);
+        assert.ok(delay === 6000 || delay === 4000 || delay === 550 || delay === 700 || delay === 0);
         timers.set(++nextTimer, callback);
+        timerDelays.set(nextTimer, delay);
         return nextTimer;
       },
       clearTimeout: (id: number) => timers.delete(id), setInterval: () => 0,
@@ -120,7 +122,7 @@ function app(hidden = false, overrides: Record<string, unknown> = {}) {
   const cerebras = runInContext('cerebras', context) as TestLane;
   const compare = runInContext('compare', context) as TestLane;
   return {
-    document, timers, generations, cerebras, compare,
+    document, timers, timerDelays, generations, cerebras, compare,
     run(code: string) { return runInContext(code, context); },
     variants: runInContext('variantLanes', context) as TestLane[],
     choose(index: number) { context.index = index; runInContext('chooseVariation(variantLanes[index])', context); },
@@ -293,13 +295,14 @@ test('four variations fan out into isolated previews and selection becomes the s
   for (const index of [3, 0, 2, 1]) {
     generation.onEvent({ type: 'status', variant: index, phase: 'waiting_model' });
     assert.match(ui.variants[index].root.querySelector('.lane-status').textContent, /Waiting for Cerebras/);
+    assert.match(ui.variants[index].root.querySelector('.lane-status').textContent, /\d+\u00a0s$/);
     generation.onEvent({ type: 'delta', variant: index, text: `<html><body>Variation ${index}</body></html>` });
     ui.run(`renderLane(variantLanes[${index}])`);
     assert.equal(ui.variants[index].root.getAttribute('data-state'), 'developing');
     assert.match(ui.variants[index].root.querySelector('.code-rain').textContent, /Variation/);
     generation.onEvent({ type: 'done', variant: index, stats, appId: `saved-${index}` });
     assert.equal(ui.variants[index].root.getAttribute('data-state'), 'done');
-    assert.equal(ui.variants[index].root.querySelector('.frame-metrics').textContent, '200 tok/s · 0.10 s');
+    assert.equal(ui.variants[index].root.querySelector('.frame-metrics').textContent, '200 tok/s · 0.1 s');
   }
   generation.onEvent({ type: 'end' });
   generation.resolve();
@@ -335,6 +338,35 @@ test('four variations fan out into isolated previews and selection becomes the s
   await remix;
   assert.equal(ui.cerebras.root.querySelector('.retry').hidden, true);
 });
+
+for (const previewError of ['runtime', 'watchdog']) {
+  test(`completed variations remain visible and selectable after a ${previewError} preview error`, async () => {
+    const ui = app();
+    ui.variations(true);
+    const pending = ui.start();
+    const generation = ui.generations[0];
+    const lane = ui.variants[0];
+    const button = lane.root.querySelector('.use-variant');
+    generation.onEvent({ type: 'delta', variant: 0, text: '<html>App to fix</html>' });
+    if (previewError === 'runtime') {
+      ui.message('error', 'startup failed', lane.previewToken, lane.iframe.contentWindow);
+    }
+    generation.onEvent({ type: 'done', variant: 0, stats, appId: 'saved-with-preview-error' });
+    if (previewError === 'watchdog') ui.expire();
+    assert.ok(lane.error);
+    assert.equal(lane.root.getAttribute('data-state'), 'preview-error');
+    assert.equal(button.hidden, false);
+    assert.equal((button as any).disabled, true);
+    generation.resolve();
+    await pending;
+    assert.equal(button.hidden, false);
+    assert.equal((button as any).disabled, false);
+    button.handlers.get('click')!({});
+    ui.completeChoice();
+    assert.equal(ui.cerebras.appId, 'saved-with-preview-error');
+    assert.equal(ui.cerebras.html, '<html>App to fix</html>');
+  });
+}
 
 test('remix query loads raw HTML text into an instrumented fresh sandbox, then sends remixOf', async () => {
   const requests: string[] = [];
@@ -413,7 +445,7 @@ test('gallery route shows the full gallery and hides the builder', () => {
   assert.match(ui.document.querySelector('#app').innerHTML, /id="gallery-title">Contact sheet<\/h2>/);
 });
 
-test('choosing a variant adds the chosen class and grease circle before expanding', () => {
+test('choosing a variant shows its circle for 700 ms and ignores further picks before expanding', () => {
   const ui = app();
   ui.run("choosingVariation = true; variationsStrip.hidden = false");
   for (const [index, lane] of ui.variants.entries()) {
@@ -425,14 +457,36 @@ test('choosing a variant adds the chosen class and grease circle before expandin
   assert.match(ui.variants[0].root.innerHTML, /<svg class="circle"[^>]*>[\s\S]*?<path d=/);
   assert.equal(ui.document.querySelector('#variations-strip').hidden, false);
   assert.equal(ui.cerebras.html, '');
-  // A second pick replaces the pending choice and restarts its drawing time.
+  const timer = ui.run('choiceTimer');
+  assert.equal(ui.timerDelays.get(timer), 700);
+  ui.choose(0);
   ui.choose(1);
-  assert.equal(ui.variants[0].root.classList.contains('chosen'), false);
-  assert.equal(ui.variants[1].root.classList.contains('chosen'), true);
+  assert.equal(ui.variants[0].root.classList.contains('chosen'), true);
+  assert.equal(ui.variants[1].root.classList.contains('chosen'), false);
+  assert.equal(ui.run('choiceTimer'), timer);
   assert.equal(ui.timers.size, 1);
   ui.completeChoice();
-  assert.equal(ui.cerebras.html, '<html>Take 1</html>');
+  assert.equal(ui.cerebras.html, '<html>Take 0</html>');
   assert.equal(ui.document.querySelector('#variations-strip').hidden, true);
+});
+
+test('choosing a variant skips the delay with reduced motion', () => {
+  const ui = app();
+  ui.run("window.matchMedia = query => ({ matches: query === '(prefers-reduced-motion: reduce)' }); choosingVariation = true; variationsStrip.hidden = false");
+  ui.variants[0].html = '<html>Reduced motion</html>';
+  ui.variants[0].phase = 'done';
+  ui.choose(0);
+  assert.equal(ui.cerebras.html, '<html>Reduced motion</html>');
+  assert.equal(ui.document.querySelector('#variations-strip').hidden, true);
+  assert.equal(ui.run('choiceTimer'), 0);
+});
+
+test('frame edge prints finished and live seconds to one decimal', () => {
+  const ui = app(false, { performance: { now: () => 245720 } });
+  ui.run("variantLanes[0].text = '<html>App</html>'; variantLanes[0].stats = { totalMs: 244720, tokensPerSecond: 200, ttftMs: 10, outputTokens: 20 }; renderStats(variantLanes[0])");
+  assert.equal(ui.variants[0].root.querySelector('.frame-metrics').textContent, '200 tok/s · 244.7 s');
+  ui.run('variantLanes[0].stats = null; variantLanes[0].started = 1000; renderStats(variantLanes[0])');
+  assert.equal(ui.variants[0].root.querySelector('.frame-metrics').textContent, '— tok/s · 244.7 s');
 });
 
 // This is the security boundary for every srcdoc write, including future preview paths.
