@@ -120,9 +120,9 @@ const SpeechRecognition = speechWindow.SpeechRecognition || speechWindow.webkitS
 let recognition: VoiceRecognition | null = null;
 mic.hidden = !SpeechRecognition;
 
-function stopListening() {
+function stopListening(discardResults = true) {
   const current = recognition;
-  recognition = null;
+  if (discardResults) recognition = null;
   mic.setAttribute('aria-pressed', 'false');
   mic.setAttribute('aria-label', 'Speak your prompt');
   // Some engines throw if speech has already ended.
@@ -130,7 +130,8 @@ function stopListening() {
 }
 
 mic.addEventListener('click', () => {
-  if (recognition) { stopListening(); return; }
+  // A manual stop can still deliver a final transcript before onend.
+  if (recognition) { stopListening(false); return; }
   if (!SpeechRecognition || prompt.disabled) return;
   voiceStatus.textContent = '';
   try {
@@ -666,6 +667,11 @@ async function runGeneration(request: NonNullable<typeof lastRun>) {
   clearInterval(timer);
   if (controller !== run) return;
   controller = null;
+  if (choosingVariation && !succeeded && request.bodies[0].remixOf && cerebras.appId && cerebras.html) {
+    choosingVariation = false;
+    lanesElement.hidden = false;
+    setVariations(false);
+  }
   if (succeeded) {
     prompt.value = '';
     for (const lane of selected) element<HTMLInputElement>('.remix-prompt', lane.root).value = '';

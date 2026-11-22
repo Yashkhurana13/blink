@@ -832,6 +832,50 @@ test('remix x4 sends the parent and instruction, develops fresh frames, and sele
   await next;
 });
 
+for (const failure of ['429', '503', 'all variants', 'cancelled']) {
+  test(`remix x4 failure (${failure}) restores the original workspace and keeps errors in the strip`, async t => {
+    const httpFailure = failure === '429' || failure === '503';
+    if (httpFailure) {
+      t.mock.method(globalThis, 'fetch', async () => Response.json({}, { status: Number(failure) }));
+    }
+    const ui = app(false, httpFailure ? { generate } : {});
+    ui.preview('<html>Original app</html>');
+    ui.cerebras.appId = 'original';
+    ui.cerebras.phase = 'done';
+    const original = ui.cerebras.iframe;
+    ui.variations(true);
+    const pending = ui.start();
+    assert.equal(ui.document.querySelector('#lanes').hidden, true);
+    if (failure === 'all variants') {
+      const generation = ui.generations[0];
+      for (let variant = 0; variant < 4; variant++) {
+        generation.onEvent({ type: 'error', variant, message: 'Provider failed', retryable: true });
+      }
+      generation.resolve();
+    } else if (failure === 'cancelled') {
+      ui.run('controller.abort()');
+    }
+    await pending;
+    assert.equal(ui.document.querySelector('#lanes').hidden, false);
+    assert.equal(ui.document.querySelector('#empty-film').hidden, true);
+    assert.equal(ui.cerebras.root.hidden, false);
+    assert.equal(ui.cerebras.html, '<html>Original app</html>');
+    assert.equal(ui.cerebras.appId, 'original');
+    assert.equal(ui.cerebras.phase, 'done');
+    assert.equal(ui.cerebras.iframe, original);
+    assert.equal(original.hidden, false);
+    for (const selector of ['.share', '.download', '.remix', '.remix-prompt']) {
+      assert.equal((ui.cerebras.root.querySelector(selector) as any).disabled, false);
+    }
+    assert.equal(ui.document.querySelector('#submit').textContent, 'Remix');
+    assert.equal(ui.document.querySelector('#variations-strip').hidden, false);
+    for (const lane of ui.variants) {
+      assert.equal(lane.root.querySelector('.lane-error').hidden, false);
+      assert.ok(lane.root.querySelector('.lane-error').querySelector('span').textContent);
+    }
+  });
+}
+
 class FakeSpeechRecognition {
   static instances: FakeSpeechRecognition[] = [];
   interimResults = false;
@@ -886,6 +930,24 @@ test('voice input is hidden when speech recognition is unavailable', () => {
   assert.equal(app().document.querySelector('#mic').hidden, true);
 });
 
+test('manual voice stop keeps the final transcript delivered before onend', () => {
+  const ui = app(false, { window: { SpeechRecognition: FakeSpeechRecognition } });
+  const mic = ui.document.querySelector('#mic');
+  const input = ui.document.querySelector('#prompt');
+  mic.handlers.get('click')!({});
+  const recognition = FakeSpeechRecognition.instances.at(-1)!;
+  recognition.result(['Make a']);
+  mic.handlers.get('click')!({});
+  assert.equal(recognition.stopped, true);
+  recognition.result(['Make a clock'], true);
+  assert.equal(input.value, 'Make a clock');
+  recognition.onend?.();
+  recognition.result(['Too late'], true);
+  assert.equal(input.value, 'Make a clock');
+  assert.equal(mic.getAttribute('aria-pressed'), 'false');
+  assert.equal(ui.generations.length, 0);
+});
+
 for (const [error, message] of [
   ['not-allowed', /microphone access/i],
   ['no-speech', /no speech/i],
@@ -917,6 +979,7 @@ test('voice fills the main remix prompt and stops before generation; late events
   const input = ui.document.querySelector('#prompt');
   assert.equal(input.value, 'Add a streak counter');
   assert.equal(ui.generations.length, 0);
+  mic.handlers.get('click')!({});
   const pending = ui.document.querySelector('#prompt-form').requestSubmit();
   assert.equal(recognition.stopped, true);
   assert.equal(mic.getAttribute('aria-pressed'), 'false');
@@ -937,6 +1000,7 @@ test('voice transcript respects the prompt limit and New stops a listening sessi
   const recognition = FakeSpeechRecognition.instances.at(-1)!;
   recognition.result(['A very long prompt']);
   assert.equal(input.value, 'A ver');
+  mic.handlers.get('click')!({});
   ui.document.querySelector('#new').handlers.get('click')!({});
   assert.equal(recognition.stopped, true);
   assert.equal(mic.getAttribute('aria-pressed'), 'false');
