@@ -68,7 +68,7 @@ test('provides isolated storage and dialog stubs before app startup', () => {
   assert.equal(window.prompt('hello'), null);
 });
 
-test('embeds the token safely and forwards errors, rejections, and readiness after load and a frame', () => {
+test('embeds the token safely and posts readiness on DOMContentLoaded, load, and a frame', () => {
   const token = 'preview-"</script><script>bad()</script>';
   const handlers = new Map<string, (event?: unknown) => void>();
   const frames: (() => void)[] = [];
@@ -95,10 +95,15 @@ test('embeds the token safely and forwards errors, rejections, and readiness aft
     [token, 'error', 'async failed'],
     [token, 'error', 'string rejection'],
   ]);
+  handlers.get('DOMContentLoaded')!();
+  assert.equal(messages.length, 4);
   handlers.get('load')!();
-  assert.equal(messages.length, 3);
+  assert.equal(messages.length, 5);
   assert.equal(frames.length, 1);
   frames[0]();
-  assert.equal(messages[3].blinkPreview, token);
-  assert.equal(messages[3].type, 'ready');
+  assert.equal(messages.length, 6);
+  for (const message of messages.slice(3)) {
+    assert.equal(message.blinkPreview, token);
+    assert.equal(message.type, 'ready');
+  }
 });

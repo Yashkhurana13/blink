@@ -23,8 +23,11 @@ export function buildPreviewDoc(html: string, token: string): string {
     window.addEventListener('unhandledrejection', event => {
       parent.postMessage({ blinkPreview: token, type: 'error', message: String(event.reason?.message ?? event.reason) }, '*');
     });
+    const ready = () => parent.postMessage({ blinkPreview: token, type: 'ready' }, '*');
+    window.addEventListener('DOMContentLoaded', ready);
     window.addEventListener('load', () => {
-      window.requestAnimationFrame(() => parent.postMessage({ blinkPreview: token, type: 'ready' }, '*'));
+      ready();
+      window.requestAnimationFrame(ready);
     });
   })();</script>`;
   const opening = /<head\b[^>]*>/i.exec(html) ?? /<html\b[^>]*>/i.exec(html);

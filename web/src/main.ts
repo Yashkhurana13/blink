@@ -88,9 +88,10 @@ function createLane(id: Lane, label: string) {
   element<HTMLIFrameElement>('iframe', root).title = `${label} app preview`;
   const conversationId: string = crypto.randomUUID();
   const lane = {
-    id, root, conversationId, html: '', text: '', error: '',
+    id, root, conversationId, html: '', text: '', error: '', soloRevision: 0,
+    errorKind: null as 'watchdog' | 'runtime' | 'generation' | null,
     streaming: false, previewSet: false, started: 0, firstDelta: null as number | null,
-    previewToken: '', previewTimer: null as number | null,
+    previewToken: '', previewTimer: null as number | null, previewReady: false,
     stats: null as Stats | null,
     code: element<HTMLElement>('code', root), pre: element<HTMLPreElement>('pre', root),
     iframe: element<HTMLIFrameElement>('iframe', root),
@@ -169,26 +170,48 @@ function renderLane(lane: LaneState) {
 
 function resetPreviewWatch(lane: LaneState) {
   lane.previewToken = '';
+  lane.previewReady = false;
   if (lane.previewTimer !== null) window.clearTimeout(lane.previewTimer);
   lane.previewTimer = null;
+}
+
+function startPreviewWatch(lane: LaneState) {
+  if (document.hidden || !lane.previewToken || lane.previewReady || lane.previewTimer !== null) return;
+  const token = lane.previewToken;
+  lane.previewTimer = window.setTimeout(() => {
+    lane.previewTimer = null;
+    if (document.hidden || lane.previewToken !== token || lane.previewReady || lane.error) return;
+    lane.error = 'The app didn\'t render. Try Remix: "fix the blank screen"';
+    lane.errorKind = 'watchdog';
+    renderLane(lane);
+  }, 6000);
 }
 
 function setPreview(lane: LaneState, html: string) {
   resetPreviewWatch(lane);
   const token = crypto.randomUUID();
   lane.previewToken = token;
+  if (lane === cerebras && !race.checked) lane.soloRevision++;
   lane.html = html;
   lane.previewSet = true;
-  lane.iframe.srcdoc = buildPreviewDoc(html, token);
-  lane.iframe.hidden = false;
+  const iframe = document.createElement('iframe');
+  iframe.setAttribute('sandbox', 'allow-scripts');
+  iframe.title = lane.iframe.title;
+  iframe.srcdoc = buildPreviewDoc(html, token);
+  lane.iframe.replaceWith(iframe);
+  lane.iframe = iframe;
   element<HTMLElement>('.preview-empty', lane.root).hidden = true;
-  lane.previewTimer = window.setTimeout(() => {
-    lane.previewTimer = null;
-    if (lane.previewToken !== token || lane.error) return;
-    lane.error = 'The app didn\'t render. Try Remix: "fix the blank screen"';
-    renderLane(lane);
-  }, 6000);
+  startPreviewWatch(lane);
 }
+
+document.addEventListener('visibilitychange', () => {
+  for (const lane of lanes) {
+    if (document.hidden) {
+      if (lane.previewTimer !== null) window.clearTimeout(lane.previewTimer);
+      lane.previewTimer = null;
+    } else startPreviewWatch(lane);
+  }
+});
 
 window.addEventListener('message', event => {
   const data = event.data;
@@ -197,22 +220,31 @@ window.addEventListener('message', event => {
     && event.source === lane.iframe.contentWindow);
   if (!lane) return;
   if (data.type === 'ready') {
+    lane.previewReady = true;
     if (lane.previewTimer !== null) window.clearTimeout(lane.previewTimer);
     lane.previewTimer = null;
+    if (lane.errorKind === 'watchdog') {
+      lane.error = '';
+      lane.errorKind = null;
+      renderLane(lane);
+    }
   } else if (data.type === 'error' && typeof data.message === 'string') {
     lane.error = `The app hit an error: ${data.message}`;
+    lane.errorKind = 'runtime';
     renderLane(lane);
   }
 });
 
-function syncRaceContexts(refreshCompare = false) {
-  const contexts = syncRaceLanes(cerebras, compare, crypto.randomUUID(), refreshCompare);
+function syncRaceContexts() {
+  const contexts = syncRaceLanes(cerebras, compare, crypto.randomUUID());
   lanes.forEach((lane, index) => {
     const context = contexts[index];
     if (context === lane) return;
     lane.conversationId = context.conversationId;
+    lane.soloRevision = context.soloRevision;
     lane.text = context.html;
     lane.error = '';
+    lane.errorKind = null;
     lane.stats = lane.firstDelta = null;
     lane.started = 0;
     setPreview(lane, context.html);
@@ -241,6 +273,7 @@ form.addEventListener('submit', async event => {
     resetPreviewWatch(lane);
     lane.text = '';
     lane.error = '';
+    lane.errorKind = null;
     lane.stats = null;
     lane.firstDelta = null;
     lane.started = started;
@@ -270,12 +303,19 @@ form.addEventListener('submit', async event => {
           scheduleRender();
         } else {
           lane.streaming = false;
-          if (event.type === 'error') lane.error = event.message;
-          else {
+          if (event.type === 'error') {
+            lane.error = event.message;
+            lane.errorKind = 'generation';
+          } else {
             lane.stats = event.stats;
             const html = extractHtml(lane.text);
-            if (html === null) lane.error = 'No complete HTML app was returned. Please try again.';
-            else { setPreview(lane, html); succeeded = true; }
+            if (html === null) {
+              lane.error = 'No complete HTML app was returned. Please try again.';
+              lane.errorKind = 'generation';
+            } else {
+              if (html !== lane.html) setPreview(lane, html);
+              succeeded = true;
+            }
           }
           renderLane(lane);
         }
@@ -283,6 +323,7 @@ form.addEventListener('submit', async event => {
     } catch (error) {
       if (controller !== run) return;
       lane.error = error instanceof Error ? error.message : 'Generation failed. Please try again.';
+      lane.errorKind = 'generation';
     } finally {
       if (controller === run) {
         lane.streaming = false;
@@ -305,6 +346,8 @@ newButton.addEventListener('click', () => {
     resetPreviewWatch(lane);
     lane.conversationId = crypto.randomUUID();
     lane.html = lane.text = lane.error = '';
+    lane.errorKind = null;
+    lane.soloRevision = 0;
     lane.streaming = lane.previewSet = false;
     lane.stats = lane.firstDelta = null;
     lane.started = 0;
@@ -333,7 +376,7 @@ for (const example of examples) {
 
 prompt.addEventListener('input', updateControls);
 race.addEventListener('change', () => {
-  if (race.checked) syncRaceContexts(true);
+  if (race.checked) syncRaceContexts();
   compare.root.hidden = !race.checked;
   lanesElement.classList.toggle('is-racing', race.checked);
   updateControls();
