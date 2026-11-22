@@ -31,9 +31,6 @@ export function buildPreviewDoc(html: string, token: string): string {
     });
   })();</script>`;
   const policy = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; media-src data: blob:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'">`;
-  const head = /<head\b[^>]*>/i.exec(html);
-  const opening = head ?? /<html\b[^>]*>/i.exec(html);
-  const index = opening ? opening.index + opening[0].length : 0;
-  const bootstrap = policy + script;
-  return html.slice(0, index) + (head ? bootstrap : `<head>${bootstrap}</head>`) + html.slice(index);
+  // Establish the implicit head before parsing any generated markup.
+  return '<!doctype html><meta charset="utf-8">' + policy + script + html.replace(/^\s*<!doctype\b[^>]*>/i, '');
 }

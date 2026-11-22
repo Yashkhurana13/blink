@@ -11,37 +11,31 @@ function previewScript(html: string) {
 
 const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; media-src data: blob:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'">`;
 
-test('puts network isolation first in head, before instrumentation and app scripts', () => {
-  const html = '<!doctype html>\n<html lang="en"><head>\n<title>App</title><script>start()</script></head><body>Hello</body></html>';
-  const doc = buildPreviewDoc(html, 'preview-token');
-  assert.ok(doc.startsWith('<!doctype html>\n<html lang="en"><head>' + csp + '<script>'));
-  assert.ok(doc.indexOf(csp) < doc.indexOf('<script>'));
-  assert.equal(doc.replace(csp, '').replace(/<script>[\s\S]*?<\/script>/, ''), html);
-});
-
-test('creates a head after html or at the start when no head exists', () => {
-  for (const [html, prefix] of [
-    ['<!doctype html><html lang="en"><body>Hello</body></html>', '<!doctype html><html lang="en">'],
-    ['<script>start()</script><div>Hello</div>', ''],
-    ['', ''],
-  ]) {
+for (const [name, doctype, generated] of [
+  ['normal document', '<!doctype html>', '\n<html lang="en"><head>\n<title>App</title><style>body { color: red }</style><meta name="app" content="yes"><script>start()</script></head><body>Hello</body></html>'],
+  ['comment containing head', '<!doctype html>', '<html><!-- <head> --><head></head><body>Hello<script>start()</script></body></html>'],
+  ['comment containing html', '', '<!-- <html><head> --><div>Hello</div>'],
+  ['unclosed comment', '', '<html><!-- <head><script>start()</script><body>Hello'],
+  ['script before head', '<!doctype html>', '<html><script>start()</script><head><title>App</title></head><body>Hello</body></html>'],
+  ['no doctype', '', '<html><head></head><body>Hello</body></html>'],
+  ['uppercase doctype', '<!DOCTYPE HTML>', '<HTML><HEAD data-app="yes"><TITLE>App</TITLE></HEAD><BODY>Hello</BODY></HTML>'],
+  ['leading BOM and whitespace', '\uFEFF \n\t<!DoCtYpE html>', '\n<html><head></head><body>Hello</body></html>'],
+  ['leading whitespace without doctype', '', '\uFEFF \n\t<div>Hello</div>'],
+  ['nonleading doctype', '', '<!-- keep --><!doctype html><div>Hello</div>'],
+  ['fragment', '', '<script>start()</script><div>Hello</div>'],
+  ['empty document', '', ''],
+]) {
+  test(`puts the trusted prefix before all generated markup: ${name}`, () => {
+    const html = doctype + generated;
     const doc = buildPreviewDoc(html, 'token');
-    assert.ok(doc.startsWith(prefix + '<head>' + csp + '<script>'));
+    assert.ok(doc.startsWith('<!doctype html><meta charset="utf-8">' + csp + '<script>'));
+    assert.equal(doc.split(csp).length - 1, 1);
     assert.ok(doc.indexOf(csp) < doc.indexOf('<script>'));
-    assert.equal(doc.replace(/<head>[\s\S]*?<\/head>/, ''), html);
-  }
-});
-
-test('recognizes uppercase head and html tags', () => {
-  for (const [html, prefix] of [
-    ['<HTML><HEAD data-app="yes"><TITLE>App</TITLE></HEAD></HTML>', '<HTML><HEAD data-app="yes">'],
-    ['<HTML lang="en"><BODY>App</BODY></HTML>', '<HTML lang="en"><head>'],
-  ]) {
-    const doc = buildPreviewDoc(html, 'token');
-    assert.ok(doc.startsWith(prefix + csp + '<script>'));
-    assert.ok(doc.indexOf(csp) < doc.indexOf('<script>'));
-  }
-});
+    const bootstrapEnd = doc.indexOf('</script>') + '</script>'.length;
+    assert.equal(doc.slice(0, bootstrapEnd), buildPreviewDoc('', 'token'));
+    assert.equal(doc.slice(bootstrapEnd), generated);
+  });
+}
 
 test('provides isolated storage and dialog stubs before app startup', () => {
   const window = {} as Window;
