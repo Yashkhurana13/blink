@@ -1,0 +1,288 @@
+<title>Blink Lightbox</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;900&family=Hanken+Grotesk:wght@400;500;600&family=Martian+Mono:wdth,wght@75..112.5,400;75..112.5,600&family=Silkscreen&display=swap">
+<style>
+/* Layout: a photographer's lightbox. The page is the lit table; every generation is exposed onto a dark film strip, and you circle the frame you want in grease pencil. Deliberately single-theme (a lightbox is always lit). */
+:root{
+  --lightbox:#EDF1F5;      /* lit opal glass, cool */
+  --lightbox-deep:#DCE3EA; /* glass seams, wells */
+  --film:#1D1813;          /* film base, warm brown-black */
+  --film-2:#2B241D;        /* frame interior before exposure */
+  --edge:#F0A53B;          /* edge-print amber */
+  --grease:#E0342C;        /* china-marker red */
+  --ink:#14171B;
+  --ink-soft:#5D6672;
+  --paper:#FFFFFF;
+  --f-display:"Big Shoulders Display","Arial Narrow",Impact,sans-serif;
+  --f-body:"Hanken Grotesk",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-mono:"Martian Mono",ui-monospace,"SF Mono",Menlo,monospace;
+  color-scheme:light;
+}
+*{box-sizing:border-box}
+body{background:var(--lightbox);color:var(--ink);font:16px/1.5 var(--f-body);
+  background-image:linear-gradient(var(--lightbox-deep) 1px,transparent 1px),linear-gradient(90deg,var(--lightbox-deep) 1px,transparent 1px);
+  background-size:120px 120px;background-position:-1px -1px}
+.wrap{max-width:1180px;margin:0 auto;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+:focus-visible{outline:3px solid var(--grease);outline-offset:3px}
+
+/* Header */
+header .wrap{display:flex;align-items:center;justify-content:space-between;padding-block:18px}
+.logo{display:flex;align-items:center;gap:10px;font:900 30px/1 var(--f-display);letter-spacing:.01em;text-transform:uppercase;color:var(--ink);text-decoration:none}
+.shutter{width:26px;height:26px;border-radius:50%;background:var(--film);position:relative;overflow:hidden}
+.shutter::after{content:"";position:absolute;inset:0;background:var(--edge);clip-path:polygon(0 42%,100% 42%,100% 58%,0 58%);animation:blink 4.5s infinite}
+@keyframes blink{0%,92%,100%{clip-path:polygon(0 42%,100% 42%,100% 58%,0 58%)}95%{clip-path:polygon(0 50%,100% 50%,100% 50%,0 50%)}}
+nav{display:flex;gap:6px}
+nav a{font:500 14px var(--f-body);color:var(--ink);text-decoration:none;padding:8px 14px;border-radius:999px}
+nav a:hover{background:var(--lightbox-deep)}
+
+/* Hero */
+.hero{padding-block:28px 22px}
+h1{font:900 clamp(56px,10.5vw,138px)/.86 var(--f-display);text-transform:uppercase;letter-spacing:-.005em;margin:0;text-wrap:balance}
+h1 em{font-style:normal;color:var(--paper);background:var(--film);padding:0 .12em;box-decoration-break:clone;-webkit-box-decoration-break:clone}
+.sub{max-width:52ch;color:var(--ink-soft);font-size:18px;margin:16px 0 0}
+
+/* Prompt */
+.prompt{margin-top:26px;display:flex;gap:10px;align-items:stretch;background:var(--paper);border:2px solid var(--ink);border-radius:14px;padding:8px;box-shadow:6px 6px 0 var(--ink)}
+.prompt input{flex:1;min-width:0;border:0;font:500 19px var(--f-body);padding:10px 12px;background:transparent;color:var(--ink)}
+.prompt input:focus{outline:none}
+.toggle{display:flex;align-items:center;gap:8px;font:600 12px var(--f-mono);font-stretch:85%;text-transform:uppercase;letter-spacing:.06em;border:1.5px solid var(--ink);border-radius:10px;padding:0 12px;background:var(--paper);color:var(--ink);cursor:pointer}
+.toggle[aria-pressed="true"]{background:var(--edge);border-color:var(--edge)}
+.go{font:900 22px/1 var(--f-display);text-transform:uppercase;letter-spacing:.04em;background:var(--grease);color:var(--paper);border:0;border-radius:10px;padding:0 26px;cursor:pointer}
+.go:active{transform:translateY(1px)}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.chips button{font:500 14px var(--f-body);background:transparent;border:1.5px dashed var(--ink-soft);color:var(--ink);border-radius:999px;padding:6px 12px;cursor:pointer}
+.chips button:hover{border-style:solid;border-color:var(--ink)}
+
+/* Film strip: the signature */
+.strip-label{display:flex;justify-content:space-between;align-items:baseline;margin:34px 0 10px;font:600 12px var(--f-mono);font-stretch:85%;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-soft)}
+.strip-label b{color:var(--ink)}
+.strip{background:var(--film);border-radius:6px;padding:30px 18px;position:relative;overflow:hidden}
+.strip::before,.strip::after{content:"";position:absolute;left:0;right:0;height:12px;
+  background:radial-gradient(circle at 50% 50%,transparent 0 0, transparent 0) ;
+  background-image:linear-gradient(90deg,transparent 0 6px,var(--lightbox) 6px 20px,transparent 20px 26px);
+  background-size:26px 12px;opacity:.92;border-radius:2px}
+.strip::before{top:9px}.strip::after{bottom:9px}
+.frames{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}
+.frame{position:relative;display:flex;flex-direction:column;gap:8px}
+.exposure{aspect-ratio:4/3;border-radius:3px;overflow:hidden;background:var(--film-2);position:relative;transition:filter 1.4s ease}
+.frame[data-state="developing"] .exposure{filter:sepia(1) brightness(.55) contrast(1.2)}
+.frame[data-state="queued"] .exposure > .app{opacity:0}
+.edge{display:flex;justify-content:space-between;gap:8px;font:600 10.5px/1.3 var(--f-mono);font-stretch:80%;text-transform:uppercase;letter-spacing:.05em;color:var(--edge)}
+.edge span:last-child{text-align:right}
+.edge .num{font-variant-numeric:tabular-nums}
+.pick{align-self:flex-start;font:600 13px var(--f-body);color:var(--lightbox);background:transparent;border:1.5px solid rgba(237,241,245,.35);border-radius:999px;padding:5px 12px;cursor:pointer}
+.pick:hover{border-color:var(--lightbox)}
+.frame[data-state="queued"] .pick,.frame[data-state="developing"] .pick{visibility:hidden}
+.status{position:absolute;inset:0;display:grid;place-items:center;text-align:center;font:600 11px/1.5 var(--f-mono);font-stretch:85%;text-transform:uppercase;letter-spacing:.06em;color:var(--edge)}
+.frame:not([data-state="queued"]) .status{display:none}
+.code-rain{position:absolute;inset:0;padding:10px;font:400 9px/1.45 var(--f-mono);color:#E9C89A;white-space:pre;overflow:hidden;opacity:.85}
+.frame:not([data-state="developing"]) .code-rain{display:none}
+.frame[data-state="developing"] .app{opacity:.0}
+
+/* Grease-pencil circle */
+.circle{position:absolute;inset:-14px -12px 26px -12px;pointer-events:none;overflow:visible}
+.circle path{fill:none;stroke:var(--grease);stroke-width:5;stroke-linecap:round;stroke-dasharray:1200;stroke-dashoffset:1200;filter:url(#rough)}
+.frame.chosen .circle path{animation:draw .55s cubic-bezier(.6,.05,.3,1) forwards}
+@keyframes draw{to{stroke-dashoffset:0}}
+.frame.chosen .pick{background:var(--grease);border-color:var(--grease);color:var(--paper)}
+
+/* Mini apps inside frames (real results: "Pomodoro timer with a fox that sleeps") */
+.app{position:absolute;inset:0;display:grid;place-items:center;transition:opacity .6s}
+.a1{background:#F6F2EA;color:#2C2A26;font-family:Georgia,serif}
+.a1 .t{font-size:clamp(26px,3.4vw,40px)}
+.a2{background:#FF7A1A;color:#2A1200;font:900 clamp(28px,3.8vw,46px)/1 var(--f-display)}
+.a3{background:#FFFFFF;color:#111;font:400 clamp(22px,3vw,34px)/1 var(--f-body);letter-spacing:.2em}
+.a4{background:#0B1A0B;color:#7CFF6B;font:400 clamp(20px,2.6vw,30px)/1 "Silkscreen",monospace}
+.app small{display:block;font:500 10px var(--f-body);letter-spacing:.12em;text-transform:uppercase;opacity:.7;text-align:center;margin-top:6px}
+.a4 small{font-family:"Silkscreen",monospace;letter-spacing:.04em}
+.fox{display:block;margin:0 auto 6px;width:clamp(28px,22%,64px);height:auto;aspect-ratio:64/40}
+
+/* Workspace */
+.work{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:18px;margin-top:30px}
+.panel{background:var(--paper);border:2px solid var(--ink);border-radius:12px;overflow:hidden;min-width:0}
+.panel-h{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:2px solid var(--ink);font:600 12px var(--f-mono);font-stretch:85%;text-transform:uppercase;letter-spacing:.06em}
+.panel pre{margin:0;padding:14px;font:400 12px/1.6 var(--f-mono);font-stretch:85%;color:var(--ink-soft);overflow:auto;height:260px}
+.panel pre b{color:var(--ink);font-weight:600}
+.big{height:260px;position:relative}
+.big .app{inset:0}
+.meter{display:flex;flex-wrap:wrap;gap:18px;padding:12px 14px;border-top:2px solid var(--ink);font:600 12px var(--f-mono);font-stretch:85%;text-transform:uppercase;letter-spacing:.05em}
+.meter b{font:900 22px/1 var(--f-display);letter-spacing:.02em;display:block;font-variant-numeric:tabular-nums}
+.actions{display:flex;gap:8px;flex-wrap:wrap;padding:12px 14px;border-top:2px solid var(--ink);align-items:center}
+.actions input{flex:1;min-width:180px;font:500 15px var(--f-body);border:1.5px solid var(--ink);border-radius:8px;padding:8px 10px}
+.btn{font:600 14px var(--f-body);border:1.5px solid var(--ink);background:var(--paper);color:var(--ink);border-radius:8px;padding:8px 14px;cursor:pointer}
+.btn.primary{background:var(--ink);color:var(--paper)}
+
+/* Gallery: a contact sheet */
+.sheet-h{display:flex;justify-content:space-between;align-items:baseline;margin:52px 0 14px}
+h2{font:900 44px/.9 var(--f-display);text-transform:uppercase;margin:0}
+.sheet{background:var(--film);border-radius:6px;padding:18px;display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px}
+.thumb{display:flex;flex-direction:column;gap:6px;text-decoration:none}
+.thumb .exposure{aspect-ratio:1}
+.thumb .edge{font-size:9.5px}
+.thumb:hover .exposure{outline:2px solid var(--edge);outline-offset:2px}
+footer{padding-block:40px;font:600 11px var(--f-mono);font-stretch:85%;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-soft)}
+.note{margin-top:8px;font:500 13px var(--f-body);color:var(--ink-soft)}
+
+@media (max-width:860px){
+  .frames{grid-template-columns:repeat(2,minmax(0,1fr));row-gap:22px}
+  .work{grid-template-columns:minmax(0,1fr)}
+  .sheet{grid-template-columns:repeat(3,minmax(0,1fr))}
+}
+@media (max-width:520px){
+  .prompt{flex-wrap:wrap}
+  .prompt input{flex-basis:100%}
+  .toggle{flex:1;justify-content:center;padding-block:10px}
+  .go{flex:1;padding-block:12px}
+  .frames{grid-template-columns:minmax(0,1fr)}
+  nav a:first-child{display:none}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::after{animation:none!important;transition:none!important}
+  .frame.chosen .circle path{stroke-dashoffset:0}
+}
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <filter id="rough"><feTurbulence type="fractalNoise" baseFrequency=".9" numOctaves="2" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2.2"/></filter>
+  <symbol id="fox" viewBox="0 0 64 40"><path d="M6 34 Q4 14 14 4 L22 16 Q32 12 42 16 L50 4 Q60 14 58 34 Q32 44 6 34Z" fill="currentColor"/><path d="M20 26 q4 3 8 0 M36 26 q4 3 8 0" stroke="#000" stroke-opacity=".55" stroke-width="2.4" fill="none" stroke-linecap="round"/></symbol>
+</svg>
+
+<header><div class="wrap">
+  <a class="logo" href="#"><span class="shutter" aria-hidden="true"></span>Blink</a>
+  <nav><a href="#gallery">Gallery</a><a href="#">New</a></nav>
+</div></header>
+
+<main class="wrap">
+  <section class="hero">
+    <h1>Think it. <em>Blink it.</em></h1>
+    <p class="sub">Describe an app in one sentence. Kimi K3.1 Pro on Cerebras writes four different working versions side by side. Circle the one you like and keep going.</p>
+
+    <form class="prompt" id="promptForm">
+      <label for="idea" class="sr" hidden>Your idea</label>
+      <input id="idea" value="Pomodoro timer with a fox that sleeps" autocomplete="off">
+      <button type="button" class="toggle" id="x4" aria-pressed="true">×4 variations</button>
+      <button type="submit" class="go">Blink</button>
+    </form>
+    <div class="chips" aria-label="Examples">
+      <button type="button">Neon snake with a rainbow trail</button>
+      <button type="button">Breakout with power-ups</button>
+      <button type="button">Typing test with live WPM</button>
+      <button type="button">Solar system you can drag to spin</button>
+    </div>
+  </section>
+
+  <div class="strip-label"><span><b>Roll 0042</b> · pomodoro timer with a fox that sleeps</span><span id="rollStatus">4 frames · 39,293 tokens</span></div>
+  <section class="strip" aria-label="Four variations">
+    <div class="frames" id="frames">
+      <div class="frame" data-state="done" data-name="Still">
+        <svg class="circle" viewBox="0 0 300 240" preserveAspectRatio="none" aria-hidden="true"><path d="M150 8 C 260 4 296 50 292 120 C 288 200 230 232 146 230 C 50 228 8 190 10 116 C 12 46 70 12 166 14"/></svg>
+        <div class="exposure"><div class="app a1"><div><svg class="fox" style="color:#C2652A"><use href="#fox"/></svg><div class="t">25:00</div><small>Still · focus</small></div></div></div>
+        <div class="edge"><span>1A ▸ Classic</span><span class="num">626 tok/s · 25.0 s</span></div>
+        <button class="pick" type="button">Use this one</button>
+      </div>
+      <div class="frame chosen" data-state="done" data-name="Sleepy Fox">
+        <svg class="circle" viewBox="0 0 300 240" preserveAspectRatio="none" aria-hidden="true"><path d="M150 8 C 260 4 296 50 292 120 C 288 200 230 232 146 230 C 50 228 8 190 10 116 C 12 46 70 12 166 14"/></svg>
+        <div class="exposure"><div class="app a2"><div><svg class="fox" style="color:#2A1200"><use href="#fox"/></svg>25:00<small>Sleepy Fox</small></div></div></div>
+        <div class="edge"><span>2A ▸ Bold</span><span class="num">751 tok/s · 37.2 s</span></div>
+        <button class="pick" type="button">Use this one</button>
+      </div>
+      <div class="frame" data-state="developing" data-name="foxtail">
+        <svg class="circle" viewBox="0 0 300 240" preserveAspectRatio="none" aria-hidden="true"><path d="M150 8 C 260 4 296 50 292 120 C 288 200 230 232 146 230 C 50 228 8 190 10 116 C 12 46 70 12 166 14"/></svg>
+        <div class="exposure">
+          <div class="code-rain">&lt;!doctype html&gt;
+&lt;title&gt;foxtail&lt;/title&gt;
+&lt;style&gt;
+ body{font:300 16px system-ui;
+  letter-spacing:.2em}
+ .fox{transition:transform 2s}
+&lt;/style&gt;
+&lt;div class="clock"&gt;25:00&lt;/div&gt;
+&lt;script&gt;
+ let left = 25 * 60;
+ function tick(){ left--;</div>
+          <div class="app a3"><div><svg class="fox" style="color:#111"><use href="#fox"/></svg>25:00<small>foxtail</small></div></div>
+        </div>
+        <div class="edge"><span>3A ▸ Minimal</span><span class="num">developing · 590 tok/s</span></div>
+        <button class="pick" type="button">Use this one</button>
+      </div>
+      <div class="frame" data-state="queued" data-name="Napdoro">
+        <svg class="circle" viewBox="0 0 300 240" preserveAspectRatio="none" aria-hidden="true"><path d="M150 8 C 260 4 296 50 292 120 C 288 200 230 232 146 230 C 50 228 8 190 10 116 C 12 46 70 12 166 14"/></svg>
+        <div class="exposure">
+          <div class="status">Waiting for Cerebras<br>· 4 s ·</div>
+          <div class="app a4"><div><svg class="fox" style="color:#7CFF6B"><use href="#fox"/></svg>25:00<small>Napdoro</small></div></div>
+        </div>
+        <div class="edge"><span>4A ▸ Retro</span><span class="num">in the queue</span></div>
+        <button class="pick" type="button">Use this one</button>
+      </div>
+    </div>
+  </section>
+  <p class="note">Mockup states, left to right: finished, circled (your pick), developing while the code streams, waiting in the queue. Press Blink to replay the roll.</p>
+
+  <section class="work" aria-label="Workspace">
+    <div class="panel">
+      <div class="panel-h"><span>index.html</span><span>13,629 tokens</span></div>
+<pre><b>&lt;!doctype html&gt;</b>
+&lt;html lang="en"&gt;
+&lt;title&gt;<b>Sleepy Fox</b>&lt;/title&gt;
+&lt;style&gt;
+  :root { --orange:#FF7A1A; --night:#2A1200 }
+  body { background:var(--orange);
+         font:900 18vmin/1 Impact,sans-serif }
+  .fox.asleep { animation: snore 3s infinite }
+&lt;/style&gt;
+&lt;main&gt;
+  &lt;svg class="fox asleep"&gt;…&lt;/svg&gt;
+  &lt;div id="clock"&gt;25:00&lt;/div&gt;
+  &lt;button id="start"&gt;Start focus&lt;/button&gt;
+&lt;/main&gt;</pre>
+    </div>
+    <div class="panel">
+      <div class="panel-h"><span>Sleepy Fox · live</span><span>Ready</span></div>
+      <div class="big"><div class="app a2"><div><svg class="fox" style="color:#2A1200;width:90px;max-width:90px"><use href="#fox"/></svg>25:00<small>Sleepy Fox · press start</small></div></div></div>
+      <div class="meter">
+        <span><b>751</b>tok/s</span><span><b>13,629</b>tokens</span><span><b>37.2 s</b>total</span><span><b>2.1 s</b>first token</span>
+      </div>
+      <div class="actions">
+        <label for="remix" hidden>Remix</label>
+        <input id="remix" placeholder="Change it: “add a streak counter and make the fox snore”">
+        <button class="btn primary" type="button">Remix</button>
+        <button class="btn" type="button">Share</button>
+        <button class="btn" type="button">Download</button>
+      </div>
+    </div>
+  </section>
+
+  <div class="sheet-h" id="gallery"><h2>Contact sheet</h2><a class="btn" href="#">See all</a></div>
+  <section class="sheet" aria-label="Fresh from the community">
+    <a class="thumb" href="#"><div class="exposure"><div class="app a4"><div>SNAKE</div></div></div><div class="edge"><span>Neon snake</span><span>2m</span></div></a>
+    <a class="thumb" href="#"><div class="exposure"><div class="app a2"><div>WPM</div></div></div><div class="edge"><span>Typing test</span><span>5m</span></div></a>
+    <a class="thumb" href="#"><div class="exposure"><div class="app a1"><div class="t">☼</div></div></div><div class="edge"><span>Solar drag</span><span>9m</span></div></a>
+    <a class="thumb" href="#"><div class="exposure"><div class="app a3"><div>▦▦▦</div></div></div><div class="edge"><span>Breakout</span><span>12m</span></div></a>
+    <a class="thumb" href="#"><div class="exposure"><div class="app a4"><div>✶✶</div></div></div><div class="edge"><span>Fireworks</span><span>20m</span></div></a>
+    <a class="thumb" href="#"><div class="exposure"><div class="app a1"><div class="t">25:00</div></div></div><div class="edge"><span>Napdoro</span><span>31m</span></div></a>
+  </section>
+</main>
+<footer><div class="wrap">Blink · Kimi K3.1 Pro on Cerebras, via OpenClaw · #KimiOnCerebras</div></footer>
+
+<script>
+const frames=[...document.querySelectorAll('.frame')];
+function choose(f){frames.forEach(x=>x.classList.remove('chosen'));void f.offsetWidth;f.classList.add('chosen')}
+frames.forEach(f=>f.querySelector('.pick').addEventListener('click',()=>choose(f)));
+document.getElementById('x4').addEventListener('click',e=>{const b=e.currentTarget;b.setAttribute('aria-pressed',b.getAttribute('aria-pressed')!=='true')});
+const edges=['626 tok/s · 25.0 s','751 tok/s · 37.2 s','590 tok/s · 19.3 s','637 tok/s · 24.2 s'];
+const delays=[[300,1500],[700,2600],[500,1900],[1100,2300]];
+document.getElementById('promptForm').addEventListener('submit',e=>{
+  e.preventDefault();
+  const rs=document.getElementById('rollStatus');rs.textContent='exposing 4 frames…';
+  frames.forEach((f,i)=>{
+    f.classList.remove('chosen');f.dataset.state='queued';
+    f.querySelector('.num').textContent='in the queue';
+    setTimeout(()=>{f.dataset.state='developing';f.querySelector('.num').textContent='developing…'},delays[i][0]);
+    setTimeout(()=>{f.dataset.state='done';f.querySelector('.num').textContent=edges[i];
+      if(frames.every(x=>x.dataset.state==='done'))rs.textContent='4 frames · 39,293 tokens'},delays[i][0]+delays[i][1]);
+  });
+});
+document.querySelectorAll('.chips button').forEach(b=>b.addEventListener('click',()=>{document.getElementById('idea').value=b.textContent}));
+</script>
