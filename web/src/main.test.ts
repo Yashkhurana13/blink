@@ -45,7 +45,7 @@ class Element {
       const child = new Element();
       child.parent = this;
       if (selector === 'iframe') child.setAttribute('sandbox', 'allow-scripts');
-      if (selector === '#variations') child.setAttribute('aria-pressed', 'false');
+      if (selector === '#variations' || selector === '#mic') child.setAttribute('aria-pressed', 'false');
       this.children.set(selector, child);
     }
     return this.children.get(selector)!;
@@ -93,6 +93,7 @@ const source = ts.transpileModule(
 const stats = { ttftMs: 10, totalMs: 100, outputTokens: 20, tokensPerSecond: 200, tokensEstimated: false };
 
 function app(hidden = false, overrides: Record<string, unknown> = {}) {
+  const { window: windowOverrides, ...contextOverrides } = overrides;
   const document = Object.assign(new Element(), { hidden, createElement: () => new Element() });
   const timers = new Map<number, () => void>();
   const timerDelays = new Map<number, number>();
@@ -122,8 +123,9 @@ function app(hidden = false, overrides: Record<string, unknown> = {}) {
         return nextTimer;
       },
       clearTimeout: (id: number) => timers.delete(id), setInterval: () => 0,
+      ...(windowOverrides as Record<string, unknown>),
     },
-    ...overrides,
+    ...contextOverrides,
   });
   runInContext(source, context);
   const cerebras = runInContext('cerebras', context) as TestLane;
@@ -787,4 +789,170 @@ test('a gallery refresh ignores an older page that finishes after sharing', asyn
   const grid = ui.document.querySelector('#gallery-grid');
   assert.deepEqual(grid.appended.map(card => card.querySelector('h3').textContent), ['new']);
   assert.equal(ui.document.querySelector('#load-more').hidden, true);
+});
+
+// Catch dropping either remixOf or variants, stale frames, and choosing the wrong next parent.
+test('remix x4 sends the parent and instruction, develops fresh frames, and selects the next remix parent', async () => {
+  const ui = app();
+  ui.preview('<html>Original</html>');
+  ui.cerebras.appId = 'original';
+  ui.cerebras.phase = 'done';
+  ui.run("setPreview(variantLanes[0], '<html>Old variation</html>'); variantLanes[0].phase = 'done'; variantLanes[0].appId = 'old'");
+  ui.variations(true);
+  const input = ui.document.querySelector('#prompt');
+  input.value = 'Add a <streak> counter';
+  const pending = ui.document.querySelector('#prompt-form').requestSubmit();
+  const generation = ui.generations[0];
+  assert.equal(generation.body.remixOf, 'original');
+  assert.equal(generation.body.variants, 4);
+  assert.equal(generation.body.prompt, 'Add a <streak> counter');
+  assert.equal('currentHtml' in generation.body, false);
+  assert.equal(ui.document.querySelector('#strip-title').textContent, 'Remix ×4 · Add a <streak> counter');
+  assert.equal(ui.document.querySelector('#variations-strip').hidden, false);
+  for (const [variant, lane] of ui.variants.entries()) {
+    assert.equal(lane.html, '');
+    assert.equal(lane.appId, null);
+    assert.equal(lane.iframe.hidden, true);
+    generation.onEvent({ type: 'delta', variant, text: `<html>Remix ${variant}</html>` });
+    ui.run('for (const lane of variantLanes) renderLane(lane)');
+    assert.equal(lane.root.getAttribute('data-state'), 'developing');
+    generation.onEvent({ type: 'done', variant, stats, appId: `remixed-${variant}` });
+  }
+  generation.onEvent({ type: 'end' });
+  generation.resolve();
+  await pending;
+  ui.choose(1);
+  ui.completeChoice();
+  assert.equal(ui.cerebras.appId, 'remixed-1');
+  assert.equal(ui.cerebras.html, '<html>Remix 1</html>');
+  assert.equal(ui.document.querySelector('#variations-strip').hidden, true);
+  const next = ui.start();
+  assert.equal(ui.generations[1].body.remixOf, 'remixed-1');
+  ui.generations[1].resolve();
+  await next;
+});
+
+class FakeSpeechRecognition {
+  static instances: FakeSpeechRecognition[] = [];
+  interimResults = false;
+  continuous = false;
+  onresult: ((event: any) => void) | null = null;
+  onerror: ((event: any) => void) | null = null;
+  onend: (() => void) | null = null;
+  stopped = false;
+  constructor() { FakeSpeechRecognition.instances.push(this); }
+  start() {}
+  stop() { this.stopped = true; }
+  result(transcripts: string[], final = false) {
+    this.onresult?.({ resultIndex: 0, results: transcripts.map(transcript => Object.assign([{ transcript, confidence: 1 }], { isFinal: final })) });
+  }
+}
+
+for (const key of ['SpeechRecognition', 'webkitSpeechRecognition']) {
+  test(`voice input supports ${key}, live transcripts, stop, and end without submitting`, () => {
+    const ui = app(false, { window: { [key]: FakeSpeechRecognition } });
+    const mic = ui.document.querySelector('#mic');
+    const input = ui.document.querySelector('#prompt');
+    assert.equal(mic.hidden, false);
+    assert.equal(mic.getAttribute('aria-pressed'), 'false');
+    mic.handlers.get('click')!({});
+    const recognition = FakeSpeechRecognition.instances.at(-1)!;
+    assert.equal(recognition.interimResults, true);
+    assert.equal(mic.getAttribute('aria-pressed'), 'true');
+    assert.equal(mic.getAttribute('aria-label'), 'Stop listening');
+    recognition.result(['Make a clock']);
+    assert.equal(input.value, 'Make a clock');
+    recognition.result(['Make a clock', ' with blue hands'], true);
+    assert.equal(input.value, 'Make a clock with blue hands');
+    assert.equal((ui.document.querySelector('#submit') as any).disabled, false);
+    mic.handlers.get('click')!({});
+    assert.equal(recognition.stopped, true);
+    assert.equal(mic.getAttribute('aria-pressed'), 'false');
+    assert.equal(mic.getAttribute('aria-label'), 'Speak your prompt');
+    recognition.onend?.();
+    assert.equal(input.value, 'Make a clock with blue hands');
+    assert.equal(ui.generations.length, 0);
+    mic.handlers.get('click')!({});
+    recognition.onend?.(); // An older session ending must not stop the new one.
+    recognition.result(['Late transcript']);
+    assert.equal(mic.getAttribute('aria-pressed'), 'true');
+    assert.equal(input.value, 'Make a clock with blue hands');
+    FakeSpeechRecognition.instances.at(-1)!.onend?.();
+    assert.equal(mic.getAttribute('aria-pressed'), 'false');
+  });
+}
+
+test('voice input is hidden when speech recognition is unavailable', () => {
+  assert.equal(app().document.querySelector('#mic').hidden, true);
+});
+
+for (const [error, message] of [
+  ['not-allowed', /microphone access/i],
+  ['no-speech', /no speech/i],
+  ['network', /try again/i],
+]) {
+  test(`voice input reports ${error} inline and can restart`, () => {
+    const ui = app(false, { window: { SpeechRecognition: FakeSpeechRecognition } });
+    const mic = ui.document.querySelector('#mic');
+    mic.handlers.get('click')!({});
+    FakeSpeechRecognition.instances.at(-1)!.onerror?.({ error });
+    assert.equal(mic.getAttribute('aria-pressed'), 'false');
+    assert.match(ui.document.querySelector('#voice-status').textContent, message);
+    assert.equal(ui.generations.length, 0);
+    mic.handlers.get('click')!({});
+    assert.equal(mic.getAttribute('aria-pressed'), 'true');
+    assert.equal(ui.document.querySelector('#voice-status').textContent, '');
+  });
+}
+
+test('voice fills the main remix prompt and stops before generation; late events cannot change it', async () => {
+  const ui = app(false, { window: { SpeechRecognition: FakeSpeechRecognition } });
+  ui.preview('<html>Original</html>');
+  ui.cerebras.appId = 'original';
+  ui.cerebras.phase = 'done';
+  const mic = ui.document.querySelector('#mic');
+  mic.handlers.get('click')!({});
+  const recognition = FakeSpeechRecognition.instances.at(-1)!;
+  recognition.result(['Add a streak counter'], true);
+  const input = ui.document.querySelector('#prompt');
+  assert.equal(input.value, 'Add a streak counter');
+  assert.equal(ui.generations.length, 0);
+  const pending = ui.document.querySelector('#prompt-form').requestSubmit();
+  assert.equal(recognition.stopped, true);
+  assert.equal(mic.getAttribute('aria-pressed'), 'false');
+  assert.equal(ui.generations[0].body.remixOf, 'original');
+  assert.equal(ui.generations[0].body.prompt, 'Add a streak counter');
+  recognition.result(['Late text']);
+  assert.equal(input.value, 'Add a streak counter');
+  ui.generations[0].resolve();
+  await pending;
+});
+
+test('voice transcript respects the prompt limit and New stops a listening session', () => {
+  const ui = app(false, { window: { SpeechRecognition: FakeSpeechRecognition } });
+  const mic = ui.document.querySelector('#mic');
+  const input = ui.document.querySelector('#prompt');
+  input.maxLength = 5;
+  mic.handlers.get('click')!({});
+  const recognition = FakeSpeechRecognition.instances.at(-1)!;
+  recognition.result(['A very long prompt']);
+  assert.equal(input.value, 'A ver');
+  ui.document.querySelector('#new').handlers.get('click')!({});
+  assert.equal(recognition.stopped, true);
+  assert.equal(mic.getAttribute('aria-pressed'), 'false');
+  recognition.result(['Late transcript']);
+  assert.equal(input.value, '');
+});
+
+test('voice input reports a synchronous start failure without losing typed text', () => {
+  class UnavailableRecognition extends FakeSpeechRecognition {
+    start() { throw new Error('Unavailable'); }
+  }
+  const ui = app(false, { window: { SpeechRecognition: UnavailableRecognition } });
+  const mic = ui.document.querySelector('#mic');
+  ui.document.querySelector('#prompt').value = 'Keep my idea';
+  mic.handlers.get('click')!({});
+  assert.equal(mic.getAttribute('aria-pressed'), 'false');
+  assert.match(ui.document.querySelector('#voice-status').textContent, /could not start/i);
+  assert.equal(ui.document.querySelector('#prompt').value, 'Keep my idea');
 });

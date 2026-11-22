@@ -29,9 +29,11 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         <label class="sr-only" for="prompt">Describe your app</label>
         <div class="prompt-bar">
           <input id="prompt" name="prompt" type="text" placeholder="What do you want to make?" autocomplete="off" maxlength="500" required>
+          <button id="mic" class="mic-button" type="button" aria-label="Speak your prompt" aria-pressed="false" aria-describedby="voice-status" hidden><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/></svg></button>
           <button id="variations" class="variations-control" type="button" aria-pressed="false">×4 variations</button>
           <button id="submit" class="primary-button" type="submit" aria-label="Blink your app" disabled>Blink</button>
         </div>
+        <p id="voice-status" class="config-message voice-status" role="status"></p>
       </form>
       <div class="examples" aria-label="Example prompts"></div>
     </section>
@@ -44,7 +46,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <label id="race-control" class="race-control" hidden><input id="race" type="checkbox"><span>Race mode</span><span class="toggle" aria-hidden="true"></span></label>
     </div>
     <section id="variations-strip" aria-label="Film strip" hidden>
-      <div class="strip-label"><b>Four variations</b><span id="roll-status" role="status">Pick a frame to keep going</span></div>
+      <div class="strip-label"><b id="strip-title">Four variations</b><span id="roll-status" role="status">Pick a frame to keep going</span></div>
       <div id="variations-grid" class="variations-grid strip" aria-label="Four variations"></div>
     </section>
     <div id="lanes" class="lanes" aria-label="Workspace"></div>
@@ -68,6 +70,8 @@ function element<T extends HTMLElement>(selector: string, root: ParentNode = doc
 
 const form = element<HTMLFormElement>('#prompt-form');
 const prompt = element<HTMLInputElement>('#prompt');
+const mic = element<HTMLButtonElement>('#mic');
+const voiceStatus = element<HTMLElement>('#voice-status');
 const submit = element<HTMLButtonElement>('#submit');
 const newButton = element<HTMLButtonElement>('#new');
 const race = element<HTMLInputElement>('#race');
@@ -97,6 +101,64 @@ function toast(message: string, error = false) {
 let controller: AbortController | null = null;
 let frame = 0;
 let choiceTimer = 0;
+
+// Speech recognition is still prefixed in some browsers and absent in others.
+interface VoiceRecognition {
+  interimResults: boolean;
+  continuous: boolean;
+  onresult: ((event: { results: ArrayLike<{ 0: { transcript: string } }> }) => void) | null;
+  onerror: ((event: { error: string }) => void) | null;
+  onend: (() => void) | null;
+  start(): void;
+  stop(): void;
+}
+const speechWindow = window as Window & {
+  SpeechRecognition?: new () => VoiceRecognition;
+  webkitSpeechRecognition?: new () => VoiceRecognition;
+};
+const SpeechRecognition = speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition;
+let recognition: VoiceRecognition | null = null;
+mic.hidden = !SpeechRecognition;
+
+function stopListening() {
+  const current = recognition;
+  recognition = null;
+  mic.setAttribute('aria-pressed', 'false');
+  mic.setAttribute('aria-label', 'Speak your prompt');
+  // Some engines throw if speech has already ended.
+  try { current?.stop(); } catch { /* Already stopped. */ }
+}
+
+mic.addEventListener('click', () => {
+  if (recognition) { stopListening(); return; }
+  if (!SpeechRecognition || prompt.disabled) return;
+  voiceStatus.textContent = '';
+  try {
+    const current = new SpeechRecognition();
+    recognition = current;
+    current.interimResults = true;
+    current.continuous = false;
+    current.onresult = event => {
+      if (recognition !== current) return;
+      prompt.value = Array.from(event.results, result => result[0].transcript).join('').slice(0, prompt.maxLength);
+      updateControls();
+    };
+    current.onerror = event => {
+      if (recognition !== current) return;
+      voiceStatus.textContent = event.error === 'not-allowed' || event.error === 'service-not-allowed'
+        ? 'Allow microphone access to speak your prompt.' : event.error === 'no-speech'
+        ? 'No speech heard. Try again.' : 'Voice input stopped. Please try again.';
+      stopListening();
+    };
+    current.onend = () => { if (recognition === current) stopListening(); };
+    mic.setAttribute('aria-pressed', 'true');
+    mic.setAttribute('aria-label', 'Stop listening');
+    current.start();
+  } catch {
+    stopListening();
+    voiceStatus.textContent = 'Voice input could not start. Please try again.';
+  }
+});
 
 function variationsOn() { return variations.getAttribute('aria-pressed') === 'true'; }
 function setVariations(on: boolean) { variations.setAttribute('aria-pressed', String(on)); }
@@ -206,6 +268,7 @@ function updateControls() {
   const busy = controller !== null || remixLoading || choiceTimer !== 0;
   const remix = !choosingVariation && activeLanes().some(lane => lane.appId);
   prompt.disabled = busy;
+  mic.disabled = busy;
   prompt.placeholder = remix ? 'What would you like to change?' : 'What do you want to make?';
   prompt.setAttribute('aria-label', remix ? 'Describe your remix' : 'Describe your app');
   submit.disabled = busy || !prompt.value.trim();
@@ -383,6 +446,7 @@ function scheduleRender() {
 
 function chooseVariation(lane: LaneState) {
   if (choiceTimer || !choosingVariation || !lane.html || lane.phase !== 'done') return;
+  stopListening();
   const run = controller;
   controller = null;
   run?.abort();
@@ -481,6 +545,7 @@ form.addEventListener('submit', event => {
 
 async function runGeneration(request: NonNullable<typeof lastRun>) {
   if (controller || remixLoading || choiceTimer) return;
+  stopListening();
   window.clearTimeout(choiceTimer);
   choiceTimer = 0;
   lastRun = request;
@@ -490,6 +555,8 @@ async function runGeneration(request: NonNullable<typeof lastRun>) {
   race.checked = request.mode === 'race';
   setVariations(choosingVariation);
   variationsStrip.hidden = !choosingVariation;
+  element('#strip-title').textContent = choosingVariation && request.bodies[0].remixOf
+    ? `Remix ×4 · ${request.idea}` : 'Four variations';
   lanesElement.hidden = choosingVariation;
   element('#empty-film').hidden = true;
   for (const lane of variantLanes) lane.root.classList.toggle('chosen', false);
@@ -497,12 +564,13 @@ async function runGeneration(request: NonNullable<typeof lastRun>) {
   lanesElement.classList.toggle('is-racing', race.checked);
   const started = performance.now();
   const selected = activeLanes();
-  const previous = new Map(selected.filter(lane => lane.html).map(lane => [lane, {
+  const previous = new Map(selected.filter(lane => !choosingVariation && lane.html).map(lane => [lane, {
     text: lane.text, stats: lane.stats, started: lane.started, firstDelta: lane.firstDelta,
     phase: lane.phase,
   }]));
   const runId = request.mode === 'race' ? crypto.randomUUID().replace(/-/g, '') : undefined;
   for (const lane of selected) {
+    if (choosingVariation) { lane.html = ''; lane.appId = null; }
     if (!previous.has(lane)) clearLanePreview(lane);
     lane.text = lane.error = '';
     lane.phase = 'idle';
@@ -624,6 +692,8 @@ function clearLanePreview(lane: LaneState) {
 }
 
 newButton.addEventListener('click', () => {
+  stopListening();
+  voiceStatus.textContent = '';
   controller?.abort();
   controller = null;
   remixLoading = false;
@@ -720,6 +790,7 @@ getConfig().then(config => {
 });
 
 async function loadRemix(id: string) {
+  stopListening();
   const run = new AbortController();
   controller?.abort();
   controller = run;

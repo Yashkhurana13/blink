@@ -61,6 +61,10 @@ h1 em { font-style: normal; color: var(--paper); background: var(--film); paddin
 #prompt::placeholder, input::placeholder { color: var(--ink-soft); opacity: 1; }
 /* Inset focus keeps the prompt's outline inside its shared bar. */
 #prompt:focus-visible { outline-offset: -3px; border-radius: 6px; }
+.mic-button { display: grid; place-items: center; align-self: center; flex: 0 0 44px; width: 44px; height: 44px; padding: 0; border: 1.5px solid var(--ink); border-radius: 10px; background: var(--paper); }
+.mic-button[aria-pressed="true"] { color: var(--paper); background: var(--grease); border-color: var(--grease); animation: mic-pulse 1.6s ease-in-out infinite; }
+@keyframes mic-pulse { 50% { box-shadow: 0 0 0 4px rgb(224 52 44 / .18); } }
+.voice-status { margin: 10px 0 0; color: var(--grease); }
 .variations-control { display: flex; align-items: center; justify-content: center; flex-shrink: 0; font: 600 12px var(--f-mono); font-stretch: 85%; text-transform: uppercase; letter-spacing: .06em; border: 1.5px solid var(--ink); border-radius: 10px; padding: 0 12px; background: var(--paper); }
 .variations-control[aria-pressed="true"] { background: var(--edge); border-color: var(--edge); }
 .primary-button { background: var(--ink); color: var(--paper); border: 1.5px solid var(--ink); border-radius: 8px; padding: 8px 14px; font: 600 14px var(--f-body); }
@@ -70,7 +74,8 @@ h1 em { font-style: normal; color: var(--paper); background: var(--film); paddin
 .example:not(:disabled):hover { border-style: solid; border-color: var(--ink); }
 .workspace-heading, .strip-label { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin: 12px 0 10px; font: 600 12px/1.5 var(--f-mono); font-stretch: 85%; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-soft); }
 .workspace-heading p { margin: 0; }
-.strip-label { margin-top: 24px; }
+.strip-label { margin-top: 24px; flex-wrap: wrap; overflow-wrap: anywhere; }
+.strip-label b { min-width: 0; }
 .strip-label b { color: var(--ink); }
 #roll-status { text-align: right; }
 .race-control { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font: 500 12px var(--f-body); white-space: nowrap; }

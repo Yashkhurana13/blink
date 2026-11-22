@@ -855,3 +855,34 @@ test('remixes preserve conversation IDs below eight parent levels and start fres
     parent = done.appId;
   }
 });
+
+// Each remix variant must use the server's saved parent, never client-supplied HTML.
+test('remix x4 fans out with stored parent HTML, instruction and each direction', async t => {
+  const requests: any[] = [];
+  const api = setup(t, {}, async (req, res) => {
+    let text = '';
+    for await (const chunk of req) text += chunk;
+    requests.push(JSON.parse(text));
+    res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: HTML } }] })}\n\ndata: [DONE]\n\n`);
+  });
+  const parent = (await api.generate()).find(e => e.type === 'done').appId;
+  requests.length = 0;
+  const stream = await api.generate({ prompt: 'Add a streak counter', remixOf: parent, variants: 4, conversationId: 'remix-run' });
+  assert.equal(requests.length, 4);
+  assert.deepEqual(requests.map(r => r.user).sort(), ['remix-run:v0', 'remix-run:v1', 'remix-run:v2', 'remix-run:v3']);
+  for (const direction of ['classic, polished', 'bold, playful, surprising', 'minimal and elegant', 'retro / arcade']) {
+    const content = requests.find(r => r.messages[0].content.includes(`Creative direction: ${direction}.`))?.messages[0].content;
+    assert.ok(content, direction);
+    assert.ok(content.includes(`Here is the current app:\n${HTML}`));
+    assert.ok(content.includes('Change it: Add a streak counter'));
+  }
+  const done = stream.filter(e => e.type === 'done');
+  assert.equal(done.length, 4);
+  assert.equal(new Set(done.map(e => e.appId)).size, 4);
+  for (const result of done) {
+    const saved = api.db.get(result.appId)!;
+    assert.equal(saved.parentId, parent);
+    assert.equal(saved.prompt, 'Add a streak counter');
+  }
+  assert.equal(stream.at(-1).type, 'end');
+});
