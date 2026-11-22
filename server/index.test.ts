@@ -150,7 +150,9 @@ for (const lane of ['cerebras', 'compare'] as const) {
       res.write('data: {"choices":[{"delta":{"content":"<html>"}}]}\n\n');
       setTimeout(() => {
         res.write('da');
-        res.end('ta: {"choices":[{"delta":{"content":"🌟</html>"}}]}\n\ndata: {"choices":[],"usage":{"completion_tokens":10}}\n\ndata: [DONE]\n\n');
+        res.write('ta: {"choices":[{"delta":{"content":"🌟</html>"}}]}\n\n');
+        if (received!.body.stream_options?.include_usage === true) res.write('data: {"choices":[],"usage":{"completion_tokens":10}}\n\n');
+        res.end('data: [DONE]\n\n');
       }, 15);
     }));
     const url = await listen(t, app(t, {

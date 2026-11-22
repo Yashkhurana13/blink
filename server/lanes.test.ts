@@ -23,6 +23,7 @@ for (const lane of ['cerebras', 'compare'] as const) {
       const output = overrides.MAX_OUTPUT_TOKENS === '8000' ? 8000 : 9000;
       const overhead = overrides.PROMPT_OVERHEAD_TOKENS === '4200' ? 4200 : 4000;
       assert.equal(body.max_tokens, output);
+      assert.deepEqual(body.stream_options, { include_usage: true });
       assert.equal(request.estimatedTokens, overhead + Math.ceil(body.messages.reduce((n: number, m: { content: string }) => n + m.content.length, 0) / 3) + output);
     });
   }

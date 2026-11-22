@@ -69,6 +69,11 @@ export async function generate(
     json(res, 400, { error: 'App unavailable for remix' });
     return;
   }
+  // Count the parent itself as level one; bound traversal even for malformed cycles.
+  let parentDepth = 0;
+  for (let ancestor = parent; ancestor && parentDepth < 8; ancestor = ancestor.parentId ? db.get(ancestor.parentId) : undefined) {
+    parentDepth++;
+  }
   if (res.destroyed) return;
   const race = getConfig(env).compareEnabled && input.lane && (input.variants ?? 1) === 1 ? {
     // Older clients omit runId; pair those by prompt without coupling the lanes' remix parents.
@@ -101,7 +106,7 @@ export async function generate(
     await job.ready;
     if (controller.signal.aborted) return;
     started = true;
-    const request = { ...input, conversationId: input.conversationId ?? randomUUID(), currentHtml: parent?.html };
+    const request = { ...input, conversationId: parentDepth >= 8 ? randomUUID() : input.conversationId ?? randomUUID(), currentHtml: parent?.html };
     await Promise.all(Array.from({ length: input.variants ?? 1 }, async (_, variant) => {
       const tracker = createStatsTracker();
       const upstreamController = new AbortController();

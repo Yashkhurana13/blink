@@ -366,13 +366,16 @@ for (const format of ['stream', 'response'] as const) {
   test(`${format} reconciles a completion above 7000 tokens to actual prompt plus output usage`, async t => {
     t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 });
     let calls = 0;
-    const api = setup(t, { TOKENS_PER_MIN: '25000' }, (_req, res) => {
+    const api = setup(t, { TOKENS_PER_MIN: '25000' }, async (req, res) => {
+      let body = '';
+      for await (const chunk of req) body += chunk;
+      const includeUsage = JSON.parse(body).stream_options?.include_usage === true;
       calls++;
       const usage = { prompt_tokens: 3789, completion_tokens: 8000 };
       if (format === 'response') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ choices: [{ message: { content: HTML } }], usage }));
-      } else res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: HTML } }], usage })}\n\ndata: [DONE]\n\n`);
+      } else res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: HTML } }], ...(includeUsage ? { usage } : {}) })}\n\ndata: [DONE]\n\n`);
     });
     for (let i = 0; i < 2; i++) {
       const stream = await api.generate();
@@ -395,9 +398,12 @@ for (const format of ['stream', 'response'] as const) {
 test('twelve large completions wait rather than exceed TOKENS_PER_MIN within a minute', async t => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 });
   const starts: number[] = [];
-  const api = setup(t, { TOKENS_PER_MIN: '90000' }, (_req, res) => {
+  const api = setup(t, { TOKENS_PER_MIN: '90000' }, async (req, res) => {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    const includeUsage = JSON.parse(body).stream_options?.include_usage === true;
     starts.push(Date.now());
-    res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: HTML } }], usage: { prompt_tokens: 4000, completion_tokens: 9000 } })}\n\ndata: [DONE]\n\n`);
+    res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: HTML } }], ...(includeUsage ? { usage: { prompt_tokens: 4000, completion_tokens: 9000 } } : {}) })}\n\ndata: [DONE]\n\n`);
   });
   for (let i = 0; i < 6; i++) await api.generate();
   const remaining = [];
@@ -796,4 +802,55 @@ test('default report limit permits ten writes per normalized identity and resets
   assert.equal((await api.post(`/api/apps/${id}/report`)).status, 429);
   t.mock.timers.tick(1);
   assert.equal((await api.post(`/api/apps/${id}/report`)).status, 200);
+});
+
+for (const lane of ['cerebras', 'compare'] as const) {
+  test(`${lane} charges real prompt usage above the reservation before admitting another attempt`, async t => {
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 });
+    let calls = 0;
+    const api = setup(t, {
+      TOKENS_PER_MIN: '70000', COMPARE_BASE_URL: 'http://blink-test-1/v1',
+      COMPARE_API_KEY: 'secret', COMPARE_MODEL: 'model', COMPARE_LABEL: 'GPU',
+    }, async (req, res) => {
+      let body = '';
+      for await (const chunk of req) body += chunk;
+      calls++;
+      const usage = JSON.parse(body).stream_options?.include_usage === true
+        ? { prompt_tokens: 60000, completion_tokens: 100 } : undefined;
+      res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: HTML } }], usage })}\n\ndata: [DONE]\n\n`);
+    });
+    await api.generate({ prompt: 'first', lane });
+    const next = await api.post('/api/generate', { prompt: 'next', lane });
+    await new Promise(setImmediate);
+    assert.equal(calls, 1);
+    t.mock.timers.tick(59_999);
+    await new Promise(setImmediate);
+    assert.equal(calls, 1);
+    t.mock.timers.tick(1);
+    assert.ok(events(await next.text()).some(e => e.type === 'done'));
+    assert.equal(calls, 2);
+  });
+}
+
+test('remixes preserve conversation IDs below eight parent levels and start fresh at the cap', async t => {
+  const requests: any[] = [];
+  const api = setup(t, { TOKENS_PER_MIN: '1000000' }, async (req, res) => {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    requests.push(JSON.parse(body));
+    res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: HTML } }] })}\n\ndata: [DONE]\n\n`);
+  });
+  let parent = (await api.generate({ prompt: 'clock', conversationId: 'chain' })).find(e => e.type === 'done').appId;
+  for (let depth = 1; depth <= 9; depth++) {
+    const done = (await api.generate({ prompt: 'blue', remixOf: parent, conversationId: 'chain' })).find(e => e.type === 'done');
+    const request = requests.at(-1);
+    if (depth < 8) assert.equal(request.user, 'chain');
+    else {
+      assert.notEqual(request.user, 'chain');
+      assert.notEqual(request.user, requests.at(-2).user);
+    }
+    assert.ok(request.messages[0].content.includes(`Here is the current app:\n${HTML}\n\nChange it: blue`));
+    assert.equal(api.db.get(done.appId)?.parentId, parent);
+    parent = done.appId;
+  }
 });

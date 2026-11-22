@@ -38,6 +38,7 @@ export async function buildLaneRequest(input: GenerateRequest & { currentHtml?: 
     body: JSON.stringify({
       model: compare ? env.COMPARE_MODEL : 'openclaw/blink',
       stream: true,
+      stream_options: { include_usage: true },
       max_tokens: maxOutputTokens,
       user: input.conversationId,
       messages,
